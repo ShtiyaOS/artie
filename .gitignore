@@ -27,3 +27,4 @@ CLAUDE.md
 .claude/
 .cursor/
 *.prompt.md
+static/test_frame*
