@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+service-account*.json
+credentials*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Assistant artifacts
+CLAUDE.md
+.claude/
+.cursor/
+*.prompt.md
