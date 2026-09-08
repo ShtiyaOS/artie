@@ -55,6 +55,7 @@ from src.greenlight import (
     exit_predicate_met,
     check_and_apply_commitment,
 )
+from src.blueprint import produce_blueprint
 from src.greenlight_rules import validate_slot
 from src.greenlight_judgment import (
     validate_judgment,
@@ -301,8 +302,12 @@ async def greenlight_turn(
     slots = load_bible_slots(project_id)
     done = exit_predicate_met(slots)
     committed = False
+    blueprint: dict | None = None
     if done and not done_before:
         committed = check_and_apply_commitment(project_id, slots)
+        if committed:
+            # docs/02_greenlight.md §6 — six steps fire on commitment
+            blueprint = produce_blueprint(project_id)
 
     # Provenance — wrapper emits, agent does not
     publish_event(
@@ -322,6 +327,7 @@ async def greenlight_turn(
         "fills":     persisted,
         "done":      done,
         "committed": committed,
+        "blueprint": blueprint,
     }
 
 
