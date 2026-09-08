@@ -4,6 +4,7 @@ Greenlight slot definitions and Supabase persistence.
 docs/02_greenlight.md §2  — slot set (12 required, 2 optional)
 docs/02_greenlight.md §9  — exit predicate
 docs/02_greenlight.md §4  — commitment state machine
+docs/02_greenlight.md §5  — register gating
 docs/11_supabase.md §2.2  — bible_slots schema
 docs/05_orchestration.md §3.4 — dual-write pattern (Supabase first, then Confluent)
 
@@ -122,6 +123,89 @@ def unfilled_required_slots(slots: dict[str, dict]) -> list[str]:
 def exit_predicate_met(slots: dict[str, dict]) -> bool:
     """True when all 12 required slots are filled (docs/02_greenlight.md §9)."""
     return all(slots.get(s, {}).get("is_filled") for s in REQUIRED_SLOTS)
+
+
+def validated_slot_count(slots: dict[str, dict]) -> int:
+    """
+    Return the count of required slots with input_conf = VALIDATED.
+
+    Only required slots contribute to the 10-of-12 commitment threshold
+    (docs/02_greenlight.md §4). Optional slots S11 and TP1 are excluded.
+    """
+    return sum(
+        1 for s in REQUIRED_SLOTS
+        if slots.get(s, {}).get("input_conf") == "VALIDATED"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Register gating — docs/02_greenlight.md §5
+# ---------------------------------------------------------------------------
+
+# All five registers, in order. Values are the register names.
+_ALL_REGISTERS: list[str] = [
+    "Mentorial Anecdotal",
+    "Diagnostic Unsparing",
+    "Borscht Belt Deflection",
+    "Transactional Boundary",
+    "Enthusiastic Advocacy",   # locked while SKEPTICAL; unlocks at COMMITTED
+]
+
+# The register locked while SKEPTICAL.
+LOCKED_WHILE_SKEPTICAL: str = "Enthusiastic Advocacy"
+
+
+def available_registers(commitment_state: str) -> list[str]:
+    """
+    Return the list of registers available in the given commitment_state.
+
+    docs/02_greenlight.md §5 — Enthusiastic Advocacy is locked while SKEPTICAL
+    and available at COMMITTED.
+
+    Args:
+        commitment_state: "SKEPTICAL" or "COMMITTED"
+
+    Returns:
+        List of register name strings available in that state.
+    """
+    if commitment_state == "COMMITTED":
+        return list(_ALL_REGISTERS)
+    # SKEPTICAL (or any unrecognised state) — lock Enthusiastic Advocacy
+    return [r for r in _ALL_REGISTERS if r != LOCKED_WHILE_SKEPTICAL]
+
+
+def get_commitment_state(project_id: str) -> dict:
+    """
+    Return the commitment state and register gating info for a project.
+
+    Designed for the voice layer to read without needing to know the
+    register-gating rules itself (docs/02_greenlight.md §4, §5).
+
+    Returns a dict with:
+        commitment_state    "SKEPTICAL" | "COMMITTED"
+        available_registers list of register name strings
+        enthusiastic_advocacy_locked  bool  (True while SKEPTICAL)
+        use_name_not_kid    bool  (False while SKEPTICAL; True at COMMITTED)
+    """
+    sb = get_supabase()
+    result = (
+        sb.table("projects")
+        .select("commitment_state")
+        .eq("project_id", project_id)
+        .single()
+        .execute()
+    )
+    state = result.data["commitment_state"] if result.data else "SKEPTICAL"
+    registers = available_registers(state)
+    return {
+        "commitment_state":             state,
+        "available_registers":          registers,
+        "enthusiastic_advocacy_locked": LOCKED_WHILE_SKEPTICAL not in registers,
+        # At COMMITTED, Artie stops using "kid" as a generic and uses the
+        # writer's name instead. The voice layer enforces the actual wording;
+        # this flag tells it which mode applies.
+        "use_name_not_kid":             state == "COMMITTED",
+    }
 
 
 def check_and_apply_commitment(project_id: str, slots: dict[str, dict]) -> bool:
