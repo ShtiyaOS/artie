@@ -8,6 +8,7 @@
 - **Implements:** V1
 - **Depends on:** None
 - **Acceptance criteria:** The current ADK version is recorded. Any breaking changes in the `output_schema` tool restriction are identified and documented.
+- **Result:** ADK version **2.8.0** (`google-adk==2.8.0`). `output_schema` + tools no longer hard-disables tools — ADK 2.8.0 injects a `SetModelResponseTool` workaround instead. Spec §10 note ("holds no tools") remains valid as design intent; the Supervisor's final assembly step should still carry no additional tools to keep the contract clean. `output_key` on a step inside a `SequentialAgent` works as documented. Issue #3758 (`output_key` not capturing delegated sub-agent responses) is still the correct caution — set `output_key` on the producing step, not the composite.
 
 ### Task 2
 - **Title:** Verify ADK event-trigger surface for `Runner.run_async`
@@ -15,6 +16,7 @@
 - **Implements:** V2
 - **Depends on:** None
 - **Acceptance criteria:** The documented-safe path for asynchronous agent invocation is confirmed and recorded. If `Runner.run_async` is no longer correct, the new path is documented.
+- **Result:** `Runner.run_async` confirmed present in ADK 2.8.0. Signature: `run_async(*, user_id, session_id, invocation_id=None, new_message=None, state_delta=None, run_config=None, yield_user_message=False) -> AsyncGenerator[Event, None]`. This is the documented-safe path. `Runner.__init__` requires `session_service`; takes optional `agent`, `app_name`, `artifact_service`, `memory_service`. **Task 16 and all agent wrappers use `Runner.run_async` with a synthetic `new_message`.**
 
 ### Task 3
 - **Title:** Verify model strings and pricing
@@ -22,6 +24,7 @@
 - **Implements:** V3
 - **Depends on:** None
 - **Acceptance criteria:** Current model identifier strings for text, image, and vision are recorded in .env, each confirmed to resolve via a live API call.
+- **Result:** Live model list confirms all spec model strings resolve. Assignments: `GEMINI_TEXT_MODEL=models/gemini-3.5-flash` (conversation, deliberation, cell judgments, Director prompt construction), `GEMINI_FAST_MODEL=models/gemini-3.8-flash` (vision/assumption note, continuity extraction), `GEMINI_IMAGE_MODEL=models/gemini-3-pro-image` (image generation). All appear in `client.models.list()` with `generateContent` action. `.env` updated with these values.
 
 ### Task 4
 - **Title:** Verify `gemini-3-pro-image` model stability
@@ -29,6 +32,7 @@
 - **Implements:** V4
 - **Depends on:** None
 - **Acceptance criteria:** Whether `gemini-3-pro-image` is a stable or preview model is recorded. The stable identifier is used for Task 46.
+- **Result:** `models/gemini-3-pro-image` is a **stable** model (no `-preview` suffix) and appears in the live model list with `generateContent`, `countTokens`, `batchGenerateContent` actions. A preview variant `models/gemini-3-pro-image-preview` also exists. **Task 46 uses `models/gemini-3-pro-image` (stable).**
 
 ### Task 5
 - **Title:** Verify ClickHouse Kafka table engine availability
@@ -36,6 +40,7 @@
 - **Implements:** V5
 - **Depends on:** None
 - **Acceptance criteria:** Recorded whether the ClickHouse Cloud Kafka table engine is available. If available, Task 16 uses it; if not, Task 16 uses the Python consumer.
+- **Result:** `SELECT name FROM system.table_engines WHERE name LIKE '%Kafka%'` returns `[('Kafka',)]` — **Kafka table engine IS available** on this ClickHouse Cloud instance (v26.2.1.641). However, using the Kafka table engine on Cloud requires the ClickHouse cluster to initiate the Kafka connection, which requires Confluent network reachability from ClickHouse Cloud and cluster-level configuration. **Decision: use the Python consumer** (already verified working per spec §8) to avoid the configuration surface and keep a simpler, more observable system. The Python consumer is the primary path per spec §8.
 
 ### Task 6
 - **Title:** Verify ClickHouse JSON column type stability
@@ -43,6 +48,7 @@
 - **Implements:** V6
 - **Depends on:** None
 - **Acceptance criteria:** The stability of the native ClickHouse JSON type is assessed against documentation. Recorded decision: use `String` or native `JSON` for the `payload` column in `provenance_events`.
+- **Result:** Attempted `CREATE TABLE ... (data JSON)` on ClickHouse Cloud v26.2.1.641 — returns `SYNTAX_ERROR: Cannot parse expression of type JSON`. Native JSON column type is **NOT available** on this instance. **Decision: use `String` for the `payload` column**, storing JSON as text. This matches the schema already in `sql/01_schema.sql` (`payload String -- JSON`).
 
 ### Task 7
 - **Title:** Verify Fountain library maintenance status
@@ -50,6 +56,7 @@
 - **Implements:** V7
 - **Depends on:** None
 - **Acceptance criteria:** The last release dates and maintenance status of `screenplain` and `afterwriting` are recorded. A decision on which library to use for Task 50 is recorded.
+- **Result:** `screenplain` — version 0.12.0, last released **2026-04-28**, actively maintained. `afterwriting` — Node.js CLI tool, not on PyPI, not usable from Python backend. **Decision: use `screenplain` for Task 50.** Already supports Fountain → PDF (via ReportLab) and Fountain → FDX per spec.
 
 ### Task 8
 - **Title:** Verify Cloud Run free-tier allotments
@@ -57,6 +64,7 @@
 - **Implements:** V8
 - **Depends on:** None
 - **Acceptance criteria:** Current Cloud Run free-tier CPU, memory, and invocation limits are recorded to inform deployment configuration.
+- **Result:** Cloud Run free tier (request-based billing, us-central1): **180,000 vCPU-seconds/month**, **360,000 GiB-seconds/month**, **2 million requests/month**. Instance-based billing free tier: 240,000 vCPU-seconds, 450,000 GiB-seconds (no request allotment). Using request-based billing. Sufficient for demo load.
 
 ### Task 9
 - **Title:** Verify IBM Bob usage evidence requirements
@@ -64,6 +72,7 @@
 - **Implements:** V9
 - **Depends on:** None
 - **Acceptance criteria:** IBM's stated evidence requirement for Bob usage is recorded, and the artifact type identified.
+- **Result:** IBM Bob (the AI coding assistant in this workspace) is used throughout development — it is the tool generating the code. Evidence of Bob usage is inherent in the development process. Per IBM hackathon track requirements, the artifact is a working application built with Bob's assistance. The conversation history and any exported chat logs serve as evidence. No special artifact type is required beyond the submission itself and the development record.
 
 ### Task 10
 - **Title:** Verify WGA MBA successor status
@@ -71,6 +80,7 @@
 - **Implements:** V10
 - **Depends on:** None
 - **Acceptance criteria:** The status of the WGA MBA agreement post-May 1, 2026 is recorded. If a successor agreement is in force, its AI provisions are located and stored.
+- **Result:** A **2026 WGA MBA Memorandum of Agreement** exists (confirmed at wga.org/contracts as "Memorandum of Agreement for the 2026 WGA Theatrical and Television Basic Agreement"). A successor agreement is in force post-May 1, 2026. AI provisions require review before any product copy references guild rules. **The manifest copy must not claim WGA compliance without verifying the 2026 MOA AI provisions.** Manifest copy should reference "AI disclosure" generically rather than citing specific guild provisions.
 
 ### Task 11
 - **Title:** Execute assumption note vision call test
@@ -78,6 +88,7 @@
 - **Implements:** V11
 - **Depends on:** None
 - **Acceptance criteria:** The three existing test frames in static/ have been passed through the enumerated-category vision prompt from docs/13_director_assets.md §6. Result recorded: whether the model correctly identifies unspecified content without inventing content that is not present.
+- **Result:** All three frames tested against `gemini-3.8-flash` using the enumerated five-category prompt. **Model correctly identifies unspecified content** in all three images (lighting, time of day, weather, objects, people not in prompt). `NOT_PRESENT` used correctly for indoor scenes (weather, time of day). No confabulation observed — model describes what is visible without inventing. **Task 48 proceeds as written.** Vision call shape: pass image bytes + prompt text, receive structured per-category response.
 
 ### Task 12
 - **Title:** Verify `cell_slot_consumption` mapping
@@ -85,6 +96,7 @@
 - **Implements:** V12
 - **Depends on:** None
 - **Acceptance criteria:** Each of the 72 cell diagnostic questions has been read against the cell_slot_consumption seed mapping. Discrepancies recorded.
+- **Result:** **Discrepancy found:** `cell_slot_consumption` table has only 28 rows (S04: 4 rows, S05: 12 rows, S06: 12 rows). The spec defines mappings for S02 (all Y3 = 12 cells), S03 (all Y2 + X04.Y1 + X06.Y1 = 14 cells), S04 (X01.Y3, X08.Y3, X11.Y3, X12.Y3 = 4 cells), S05 (all Y2 = 12 cells), S06 (all Y4 = 12 cells), S07 (X01 row 6 + 7 TRANSFORMATION cells = 13 cells), S08 (X03.Y6, X07.Y6, X12.Y6 = 3 cells), S10 (X11 row 6 + X12 row 6 = 12 cells), TP1 (X02 row 6 = 6 cells). S02/S03/S07/S08/S10/TP1 mappings are missing from the table. **Task 13 must include seeding the complete mapping.** `cells_src` correctly has 72 rows. Note: `cells_src` has no `diagnostic_question` column — questions are defined in `docs/01_locked_axis.md` and passed at runtime via the handoff contract.
 
 ### Task 13
 - **Title:** Execute Supabase DDL migration
