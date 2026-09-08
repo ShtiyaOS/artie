@@ -12,7 +12,8 @@ import threading
 import uuid
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.confluent_producer import publish_event
 from src.supabase_client import get_client as get_supabase
@@ -20,6 +21,14 @@ from src.supabase_client import get_client as get_supabase
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="artie-backend", docs_url=None, redoc_url=None)
+
+# Static files (editor UI, test images, etc.)
+_static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+# Editor workbench API
+from src.api.editor import router as editor_router  # noqa: E402
+app.include_router(editor_router)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +60,17 @@ def _start_provenance_consumer():
     t = threading.Thread(target=consumer_run, name="provenance-consumer", daemon=True)
     t.start()
     logger.info("Provenance consumer thread started")
+
+
+# ---------------------------------------------------------------------------
+# Editor UI — serves the workbench HTML page
+# ---------------------------------------------------------------------------
+
+@app.get("/editor")
+async def editor_ui():
+    """Serve the editor workbench HTML page."""
+    path = os.path.join(os.path.dirname(__file__), "..", "static", "editor.html")
+    return FileResponse(path, media_type="text/html")
 
 
 # ---------------------------------------------------------------------------
