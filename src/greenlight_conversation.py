@@ -4,8 +4,10 @@ Greenlight conversation engine.
 Orchestrates the Artie ↔ writer conversation that fills Bible slots.
 
 docs/02_greenlight.md §1 — "Artie asks; never proposes. Determinism lives
-                            in the schema and the exit predicate."
+                             in the schema and the exit predicate."
 docs/02_greenlight.md §2 — slot set (12 required, 2 optional)
+docs/02_greenlight.md §8 — JUDGMENT validation, re-ask taxonomy, escalation,
+                             PROVISIONAL on non-convergence.
 docs/04_agent_roster.md §3 — Artie's responsibilities and refusals
 docs/05_orchestration.md §5.3 — Backend → Artie payload contract (no prose)
 
@@ -54,6 +56,10 @@ from src.greenlight import (
     check_and_apply_commitment,
 )
 from src.greenlight_rules import validate_slot
+from src.greenlight_judgment import (
+    validate_judgment,
+    JUDGMENT_QUESTIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +230,9 @@ async def greenlight_turn(
         logger.warning("Artie did not return valid JSON; treating as plain reply")
         fills = []
 
-    # Persist fills — RULE check first, then Supabase + Confluent (dual-write rule)
+    # Persist fills — RULE check first, JUDGMENT second, then dual-write
+    # docs/02_greenlight.md §8 — JUDGMENT runs after RULE passes.
+    # docs/02_greenlight.md §8 — PROVISIONAL on non-convergence; do not block.
     bible_version_id = _current_bible_version(project_id)
     persisted: list[dict] = []
     rule_errors: list[str] = []
@@ -233,14 +241,45 @@ async def greenlight_turn(
         value  = fill.get("value")
         conf   = fill.get("input_conf", "VALIDATED")
         if sid and value is not None and sid in SLOT_LABELS:
+            # 1. RULE check — deterministic; fail blocks persistence.
             rule_result = validate_slot(sid, value)
             if not rule_result.ok:
-                # Rule failed — do not persist; surface the error in the reply
                 rule_errors.append(rule_result.error)
                 logger.info(
                     "Rule check failed for slot %s: %s", sid, rule_result.error
                 )
                 continue
+
+            # 2. JUDGMENT check — model-evaluated; only for judgment-dominant
+            #    slots (S02, S03, S04, S08, S14, TP1). Other slots use the
+            #    confidence Artie already assigned in the fill envelope.
+            if sid in JUDGMENT_QUESTIONS:
+                reask_count = _get_reask_count(project_id, sid, slots)
+                judgment = validate_judgment(
+                    slot_id=sid,
+                    value=value,
+                    reask_count=reask_count,
+                    slot_label=SLOT_LABELS.get(sid, sid),
+                )
+                conf = judgment.confidence
+
+                # Emit SLOT_PROVISIONAL when the judgment degraded the value.
+                if conf == "PROVISIONAL":
+                    publish_event(
+                        event_type="SLOT_PROVISIONAL",
+                        actor="system",
+                        payload={
+                            "slot_id":     sid,
+                            "reask_count": reask_count,
+                            "failure_mode": (
+                                "attempt_limit_reached"
+                                if reask_count >= 3
+                                else "judgment_not_satisfied"
+                            ),
+                        },
+                        project_id=project_id,
+                    )
+
             upsert_slot(
                 project_id=project_id,
                 slot_id=sid,
@@ -360,4 +399,20 @@ def _seed_s14_if_needed(
             bible_version_id=bible_version_id,
         )
 
+
+
+def _get_reask_count(
+    project_id: str,
+    slot_id: str,
+    slots: dict[str, dict],
+) -> int:
+    """
+    Return the current reask_count for slot_id from the already-loaded slots dict.
+
+    docs/02_greenlight.md §8 — the three-attempt ladder is tracked via
+    reask_count persisted in bible_slots.reask_count.
+    Falls back to 0 when the slot has no row yet.
+    """
+    row = slots.get(slot_id, {})
+    return int(row.get("reask_count") or 0)
 
