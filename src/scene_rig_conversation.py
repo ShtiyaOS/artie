@@ -8,6 +8,7 @@ docs/03_scene_rig.md §2 — slot set (7 required)
 docs/03_scene_rig.md §4 — exit predicate: RULE checks only; accept-first;
                             JUDGMENT runs asynchronously after the writer
                             enters the drafting surface — never a wall before it.
+                            See src/scene_rig_rules.py for the RULE implementations.
 docs/03_scene_rig.md §6 — carry-over rules (N01 pre-fills; N03/N04/N05/N07 reset fully)
 docs/04_agent_roster.md §3 — Artie's responsibilities and refusals
 docs/05_orchestration.md §5.3 — Backend → Artie payload contract (no prose)
@@ -71,6 +72,7 @@ from src.scene_rig import (
     resolve_or_create_location,
     get_project_genre,
 )
+from src.scene_rig_rules import validate_rig_slot as _validate_rig_slot_rule
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,9 @@ def _get_runner() -> tuple[Runner, InMemorySessionService]:
 
 # ---------------------------------------------------------------------------
 # RULE checks — deterministic; no model call (docs/03_scene_rig.md §4)
+# Delegates to scene_rig_rules.validate_rig_slot.
+# Retained as a thin shim so callers that imported _validate_rig_slot from
+# this module continue to work unchanged.
 # ---------------------------------------------------------------------------
 
 def _validate_rig_slot(slot_id: str, value: Any) -> tuple[bool, str]:
@@ -166,63 +171,12 @@ def _validate_rig_slot(slot_id: str, value: Any) -> tuple[bool, str]:
 
     Returns (ok, error_message).  error_message is empty when ok is True.
     docs/03_scene_rig.md §3 (RULE column), §4 (exit predicate).
+
+    Delegates to src.scene_rig_rules.validate_rig_slot (the canonical
+    implementation introduced by Task 26).
     """
-    if slot_id == "N01":
-        if not isinstance(value, str) or value.strip() not in POSITION_VALUES:
-            allowed = ", ".join(sorted(POSITION_VALUES))
-            return False, f"N01 Narrative Position must be one of: {allowed}."
-        return True, ""
-
-    if slot_id in ("N02", "N06"):
-        # Resolves to existing or creates new — must be a non-empty string name.
-        if not isinstance(value, str) or not value.strip():
-            label = SLOT_LABELS.get(slot_id, slot_id)
-            return False, f"{slot_id} {label} must be a non-empty name."
-        return True, ""
-
-    if slot_id in ("N03", "N07"):
-        if not isinstance(value, str) or not value.strip():
-            label = SLOT_LABELS.get(slot_id, slot_id)
-            return False, f"{slot_id} {label} must be a non-empty string."
-        return True, ""
-
-    if slot_id == "N04":
-        # Must be a dict with locus ∈ enum and non-empty text.
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                return False, "N04 Obstacle must be a structured object with 'locus' and 'text'."
-        if not isinstance(value, dict):
-            return False, "N04 Obstacle must be a structured object with 'locus' and 'text'."
-        locus = value.get("locus", "")
-        text  = value.get("text", "")
-        if not isinstance(locus, str) or locus.strip() not in OBSTACLE_LOCUS_VALUES:
-            allowed = ", ".join(sorted(OBSTACLE_LOCUS_VALUES))
-            return False, f"N04 Obstacle.locus must be one of: {allowed}."
-        if not isinstance(text, str) or not text.strip():
-            return False, "N04 Obstacle.text must be a non-empty string."
-        return True, ""
-
-    if slot_id == "N05":
-        # Must be a dict with non-empty entry_state and value_at_stake.
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                return False, "N05 Scene Frame must have 'entry_state' and 'value_at_stake'."
-        if not isinstance(value, dict):
-            return False, "N05 Scene Frame must have 'entry_state' and 'value_at_stake'."
-        entry_state    = value.get("entry_state", "")
-        value_at_stake = value.get("value_at_stake", "")
-        if not isinstance(entry_state, str) or not entry_state.strip():
-            return False, "N05 Scene Frame entry_state must be a non-empty string."
-        if not isinstance(value_at_stake, str) or not value_at_stake.strip():
-            return False, "N05 Scene Frame value_at_stake must be a non-empty string."
-        return True, ""
-
-    # Unknown slot — pass unconditionally.
-    return True, ""
+    result = _validate_rig_slot_rule(slot_id, value)
+    return result.ok, result.error
 
 
 # ---------------------------------------------------------------------------
