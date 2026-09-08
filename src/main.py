@@ -6,7 +6,9 @@ appropriate agent via Runner.run_async. Agents are peers; Artie is never
 the parent of Supervisor or Director. See docs/05_orchestration.md §1.
 """
 
+import logging
 import os
+import threading
 import uuid
 
 from fastapi import FastAPI, Request
@@ -14,7 +16,40 @@ from fastapi.responses import JSONResponse
 
 from src.confluent_producer import publish_event
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="artie-backend", docs_url=None, redoc_url=None)
+
+
+# ---------------------------------------------------------------------------
+# Provenance consumer — runs in a background thread alongside the API server.
+# docs/09_provenance_ledger.md §8
+# ---------------------------------------------------------------------------
+
+@app.on_event("startup")
+def _start_provenance_consumer():
+    """Start the Confluent → ClickHouse consumer in a daemon thread."""
+    # Guard: skip if any required env var is absent (e.g. local dev without CH)
+    required = [
+        "CONFLUENT_BOOTSTRAP_SERVERS",
+        "CONFLUENT_API_KEY",
+        "CONFLUENT_API_SECRET",
+        "CONFLUENT_TOPIC",
+        "CLICKHOUSE_HOST",
+        "CLICKHOUSE_PASSWORD",
+    ]
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
+        logger.warning(
+            "Provenance consumer NOT started — missing env vars: %s", missing
+        )
+        return
+
+    from src.provenance_consumer import run as consumer_run
+
+    t = threading.Thread(target=consumer_run, name="provenance-consumer", daemon=True)
+    t.start()
+    logger.info("Provenance consumer thread started")
 
 
 # ---------------------------------------------------------------------------
