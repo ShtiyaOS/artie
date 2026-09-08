@@ -30,38 +30,14 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Firewall — docs/05_orchestration.md §6
+# Canonical implementation lives in src/agents/firewall.py.
 # ---------------------------------------------------------------------------
 
-FORBIDDEN_KEYS = {
-    "scene_text", "script", "prose", "evidence",
-    "action_lines", "dialogue", "draft", "content",
-}
-
-
-class FirewallBreach(ValueError):
-    """Raised when a prose field reaches Artie's payload."""
-
-
-def assert_no_prose(payload: dict, path: str = "") -> None:
-    """
-    Walk the payload recursively and raise FirewallBreach if any key from
-    FORBIDDEN_KEYS is present.
-
-    Must raise, never sanitize — silent stripping lets the wiring drift
-    undetected (docs/05_orchestration.md §6).
-    """
-    for k, v in payload.items():
-        here = f"{path}.{k}" if path else k
-        if k in FORBIDDEN_KEYS:
-            raise FirewallBreach(
-                f"Prose field '{here}' reached Artie's payload"
-            )
-        if isinstance(v, dict):
-            assert_no_prose(v, here)
-        if isinstance(v, list):
-            for i, item in enumerate(v):
-                if isinstance(item, dict):
-                    assert_no_prose(item, f"{here}[{i}]")
+from src.agents.firewall import (  # noqa: E402 — after stdlib imports
+    FORBIDDEN_KEYS,
+    FirewallBreach,
+    assert_no_prose,
+)
 
 
 # ---------------------------------------------------------------------------
