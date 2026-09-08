@@ -371,13 +371,16 @@ Full axis specification is a separate document.
 
 Drawn from the September 2026 research brief. Each is verify-before-implement.
 
-**`output_schema` disables tools and sub-agent delegation.** An agent constrained
-to structured output cannot also call tools or delegate. Therefore:
+**`output_schema` disables tools and sub-agent delegation** in the ADK default
+path; ADK 2.8.0 injects a `SetModelResponseTool` workaround that preserves
+structured output without hard-blocking tool registration. The Supervisor's
+final assembly step is still configured with no tools — not because the platform
+requires it, but because the agent should have one job:
 
 > **The Script Supervisor judges; the backend persists.** The Supervisor emits
 > structured verdicts and holds no database tools. The backend receives them,
-> publishes to Confluent, and ClickHouse ingests. This sidesteps the constraint
-> entirely and is cleaner besides — the agent has one job.
+> publishes to Confluent, and ClickHouse ingests. Cleaner besides — the agent
+> has one job.
 
 **`output_key` does not capture a delegated sub-agent's response** (google-adk
 issue #3758). Set `output_key` on the agent that actually produces the text, not
