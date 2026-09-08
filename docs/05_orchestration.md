@@ -319,9 +319,12 @@ requiring re-diagnosis out of 174 total diagnoses.
 
 Each is verify-before-implement against current ADK.
 
-**`output_schema` disables tools and sub-agent delegation.** The Supervisor's
-final assembly step is schema-constrained and therefore holds no tools. It emits;
-the backend persists.
+**`output_schema` disables tools and sub-agent delegation** in the ADK default
+path; ADK 2.8.0 injects a `SetModelResponseTool` workaround that preserves
+structured output without hard-blocking tool registration. The Supervisor's
+final assembly step is still configured with no tools — the agent should have
+one job, and the backend persists the result. The constraint is a design choice,
+not a platform imposition.
 
 **`output_key` does not capture a delegated sub-agent's response** (issue #3758).
 Inside the `SequentialAgent` pipelines, set `output_key` on the step that produces

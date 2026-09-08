@@ -105,7 +105,13 @@
 - **Depends on:** None
 - **Acceptance criteria:** All tables and RLS policies from `docs/11_supabase.md` are created in the Supabase project.
 
+### Task 13a
+- Seed complete cell_slot_consumption mapping. Governs docs/10_clickhouse.md §3.4. Your Task 12 verification found only 28 of ~88 rows — S02, S03, S07, S08, S10, and TP1 are missing. Write the complete seed to sql/03_seed_cell_slot_consumption.sql and stop. Do not execute it. Acceptance: the file contains all mappings from the spec table; row count matches the spec.
+
 ## Phase 1: Spine
+
+### Task 14a
+- Correct docs/05_orchestration.md §10. Your Task 1 finding contradicts it. ADK 2.8.0 does not hard-disable tools under output_schema. Update the stated constraint, keep the design intent that the Supervisor's assembly step carries no tools.
 
 ### Task 14
 - **Title:** Implement backend skeleton on Cloud Run
