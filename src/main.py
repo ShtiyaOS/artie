@@ -7,9 +7,12 @@ the parent of Supervisor or Director. See docs/05_orchestration.md §1.
 """
 
 import os
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+from src.confluent_producer import publish_event
 
 app = FastAPI(title="artie-backend", docs_url=None, redoc_url=None)
 
@@ -21,6 +24,43 @@ app = FastAPI(title="artie-backend", docs_url=None, redoc_url=None)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Session — state events (docs/09_provenance_ledger.md §3.3)
+# ---------------------------------------------------------------------------
+
+@app.post("/session/open")
+async def session_open(request: Request):
+    """
+    Publish SESSION_OPENED to authorship.events.
+
+    Accepts optional JSON body:
+      { "project_id": "<uuid>", "slug_line": "<text>" }
+
+    Both fields are optional; defaults are generated/empty when absent.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    session_id = str(uuid.uuid4())
+    project_id = body.get("project_id") or str(uuid.uuid4())
+    slug_line = body.get("slug_line", "")
+
+    publish_event(
+        event_type="SESSION_OPENED",
+        actor="system",
+        payload={"session_id": session_id, "slug_line": slug_line},
+        project_id=project_id,
+    )
+
+    return JSONResponse(
+        {"status": "accepted", "session_id": session_id, "project_id": project_id},
+        status_code=202,
+    )
 
 
 # ---------------------------------------------------------------------------
