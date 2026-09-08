@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.confluent_producer import publish_event
+from src.supabase_client import get_client as get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -129,3 +130,27 @@ async def receive_event(request: Request):
     # handler = HANDLERS[event_type]
     # await handler(body)
     return JSONResponse({"status": "accepted"}, status_code=202)
+
+
+# ---------------------------------------------------------------------------
+# Projects — Supabase read (docs/11_supabase.md §2.1, §3)
+# ---------------------------------------------------------------------------
+
+@app.get("/project/{project_id}")
+async def get_project(project_id: str):
+    """
+    Retrieve a project row from Supabase by project_id.
+
+    Returns 404 when the project does not exist.
+    """
+    result = (
+        get_supabase()
+        .table("projects")
+        .select("*")
+        .eq("project_id", project_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    return JSONResponse(result.data[0])
