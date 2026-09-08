@@ -251,6 +251,34 @@ async def invoke_director(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Scene Rig conversation — docs/03_scene_rig.md §1
+# ---------------------------------------------------------------------------
+
+@app.post("/scene_rig/{scene_id}/turn")
+async def scene_rig_turn(scene_id: str, request: Request):
+    """
+    One writer turn in the Scene Rig conversation.
+
+    Body: { "project_id": "<str>", "user_id": "<str>", "message": "<str>" }
+    Returns: { "reply": str, "fills": [...], "done": bool }
+    """
+    from src.scene_rig_conversation import scene_rig_turn as _rig_turn
+
+    body = await request.json()
+    project_id = body.get("project_id", "")
+    user_id    = body.get("user_id", "anonymous")
+    message    = body.get("message", "")
+
+    result = await _rig_turn(
+        scene_id=scene_id,
+        project_id=project_id,
+        user_id=user_id,
+        user_message=message,
+    )
+    return JSONResponse(result, status_code=200)
+
+
+# ---------------------------------------------------------------------------
 # Greenlight conversation — docs/02_greenlight.md §1
 # ---------------------------------------------------------------------------
 
