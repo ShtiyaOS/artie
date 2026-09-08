@@ -53,6 +53,7 @@ from src.greenlight import (
     exit_predicate_met,
     check_and_apply_commitment,
 )
+from src.greenlight_rules import validate_slot
 
 logger = logging.getLogger(__name__)
 
@@ -223,14 +224,23 @@ async def greenlight_turn(
         logger.warning("Artie did not return valid JSON; treating as plain reply")
         fills = []
 
-    # Persist fills — Supabase first, then Confluent (dual-write rule)
+    # Persist fills — RULE check first, then Supabase + Confluent (dual-write rule)
     bible_version_id = _current_bible_version(project_id)
     persisted: list[dict] = []
+    rule_errors: list[str] = []
     for fill in fills:
         sid    = fill.get("slot_id")
         value  = fill.get("value")
         conf   = fill.get("input_conf", "VALIDATED")
         if sid and value is not None and sid in SLOT_LABELS:
+            rule_result = validate_slot(sid, value)
+            if not rule_result.ok:
+                # Rule failed — do not persist; surface the error in the reply
+                rule_errors.append(rule_result.error)
+                logger.info(
+                    "Rule check failed for slot %s: %s", sid, rule_result.error
+                )
+                continue
             upsert_slot(
                 project_id=project_id,
                 slot_id=sid,
@@ -239,6 +249,11 @@ async def greenlight_turn(
                 bible_version_id=bible_version_id,
             )
             persisted.append({"slot_id": sid, "input_conf": conf})
+
+    # Prepend any rule errors to the reply so the writer sees them
+    if rule_errors:
+        error_text = "\n".join(rule_errors)
+        reply = f"{error_text}\n\n{reply}" if reply else error_text
 
     # Auto-seed S14 from S02 / S05 when those slots were just filled
     _seed_s14_if_needed(project_id, fills, bible_version_id)
