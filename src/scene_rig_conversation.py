@@ -43,6 +43,7 @@ JUDGMENT runs asynchronously after the writer enters the drafting surface.
 Failures surface as a nudge after the scene, never as a wall before it.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -73,6 +74,7 @@ from src.scene_rig import (
     get_project_genre,
 )
 from src.scene_rig_rules import validate_rig_slot as _validate_rig_slot_rule
+from src.scene_rig_judgment import run_rig_judgment
 
 logger = logging.getLogger(__name__)
 
@@ -335,9 +337,13 @@ async def scene_rig_turn(
     slots = load_rig_slots(scene_id)
     done = exit_predicate_met(slots)
 
-    # Transition scene status to DRAFTING when Rig clears
+    # Transition scene status to DRAFTING when Rig clears.
+    # On the first transition, fire async JUDGMENT as a background task —
+    # never before the writer enters the drafting surface.
+    # docs/03_scene_rig.md §4; docs/05_orchestration.md §8.
     if done and not done_before:
         _transition_scene_to_drafting(scene_id)
+        asyncio.create_task(_run_rig_judgment_task(scene_id, project_id))
 
     # Provenance
     publish_event(
@@ -403,3 +409,23 @@ def _transition_scene_to_drafting(scene_id: str) -> None:
         logger.info("Scene %s transitioned to DRAFTING", scene_id)
     except Exception:
         logger.debug("_transition_scene_to_drafting: failed for %s", scene_id)
+
+
+async def _run_rig_judgment_task(scene_id: str, project_id: str) -> None:
+    """
+    Background coroutine — runs JUDGMENT on all filled Rig slots.
+
+    Fired after the exit predicate clears (writer enters DRAFTING).
+    Never blocks the writer.
+
+    docs/03_scene_rig.md §4 — "JUDGMENT runs asynchronously after the writer
+    enters the drafting surface."
+    docs/05_orchestration.md §8 — SLOT_JUDGMENT_FAILED enters a per-project
+    queue; delivered at the next scene-completion event.
+    """
+    try:
+        await asyncio.to_thread(run_rig_judgment, scene_id, project_id)
+    except Exception as exc:
+        logger.warning(
+            "Rig JUDGMENT background task failed for scene %s: %s", scene_id, exc
+        )
