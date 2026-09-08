@@ -248,3 +248,29 @@ async def invoke_director(request: Request):
         bible_version_id=bible_version_id,
     )
     return JSONResponse({"response": response}, status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# Greenlight conversation — docs/02_greenlight.md §1
+# ---------------------------------------------------------------------------
+
+@app.post("/greenlight/{project_id}/turn")
+async def greenlight_turn(project_id: str, request: Request):
+    """
+    One writer turn in the Greenlight conversation.
+
+    Body: { "user_id": "<str>", "message": "<str>" }
+    Returns: { "reply": str, "fills": [...], "done": bool, "committed": bool }
+    """
+    from src.greenlight_conversation import greenlight_turn as _gl_turn
+
+    body = await request.json()
+    user_id = body.get("user_id", "anonymous")
+    message = body.get("message", "")
+
+    result = await _gl_turn(
+        project_id=project_id,
+        user_id=user_id,
+        user_message=message,
+    )
+    return JSONResponse(result, status_code=200)
