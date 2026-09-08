@@ -154,3 +154,97 @@ async def get_project(project_id: str):
     if not result.data:
         return JSONResponse({"error": "project not found"}, status_code=404)
     return JSONResponse(result.data[0])
+
+
+# ---------------------------------------------------------------------------
+# Agent invocation endpoints — docs/05_orchestration.md §1
+# Each agent is a peer; the backend orchestrates, never Artie.
+# ---------------------------------------------------------------------------
+
+@app.post("/invoke/artie")
+async def invoke_artie(request: Request):
+    """
+    Invoke Artie with a Backend → Artie payload (docs/05_orchestration.md §5.3).
+
+    Body: { "payload": {...}, "user_id": "...", "project_id": "...",
+            "scene_id": "...", "bible_version_id": int }
+
+    Raises 422 if the payload contains prose fields (firewall breach).
+    """
+    from src.agents.artie import invoke as artie_invoke, FirewallBreach
+
+    body = await request.json()
+    payload = body.get("payload", {})
+    user_id = body.get("user_id", "anonymous")
+    project_id = body.get("project_id")
+    scene_id = body.get("scene_id")
+    bible_version_id = int(body.get("bible_version_id", 0))
+
+    try:
+        response = await artie_invoke(
+            payload=payload,
+            user_id=user_id,
+            project_id=project_id,
+            scene_id=scene_id,
+            bible_version_id=bible_version_id,
+        )
+    except FirewallBreach as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+    return JSONResponse({"response": response}, status_code=200)
+
+
+@app.post("/invoke/supervisor")
+async def invoke_supervisor(request: Request):
+    """
+    Invoke the Supervisor with a Backend → Supervisor payload
+    (docs/05_orchestration.md §5.1).
+
+    Body: { "payload": {...}, "user_id": "...", "project_id": "...",
+            "scene_id": "...", "bible_version_id": int }
+    """
+    from src.agents.supervisor import invoke as supervisor_invoke
+
+    body = await request.json()
+    payload = body.get("payload", {})
+    user_id = body.get("user_id", "anonymous")
+    project_id = body.get("project_id")
+    scene_id = body.get("scene_id")
+    bible_version_id = int(body.get("bible_version_id", 0))
+
+    response = await supervisor_invoke(
+        payload=payload,
+        user_id=user_id,
+        project_id=project_id,
+        scene_id=scene_id,
+        bible_version_id=bible_version_id,
+    )
+    return JSONResponse({"response": response}, status_code=200)
+
+
+@app.post("/invoke/director")
+async def invoke_director(request: Request):
+    """
+    Invoke the Director with a Backend → Director payload
+    (docs/05_orchestration.md §5.4).
+
+    Body: { "payload": { "action_lines": [...], "character_refs": [...] },
+            "user_id": "...", "project_id": "...", "scene_id": "..." }
+    """
+    from src.agents.director import invoke as director_invoke
+
+    body = await request.json()
+    payload = body.get("payload", {})
+    user_id = body.get("user_id", "anonymous")
+    project_id = body.get("project_id")
+    scene_id = body.get("scene_id")
+    bible_version_id = int(body.get("bible_version_id", 0))
+
+    response = await director_invoke(
+        payload=payload,
+        user_id=user_id,
+        project_id=project_id,
+        scene_id=scene_id,
+        bible_version_id=bible_version_id,
+    )
+    return JSONResponse({"response": response}, status_code=200)
