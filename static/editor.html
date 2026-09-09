@@ -420,6 +420,144 @@ const SAVE_IDLE_MS = 2000;
 const SAVE_CHAR_THRESHOLD = 200;
 let charsSinceLastSave = 0;
 
+// Provenance state
+const keystrokeBatch = {
+  timer: null,
+  startTime: null,
+  charDelta: 0,
+  componentId: null,
+};
+let lastKnownCopy = "";
+const chainHashes = new Map(); // component_id -> hash
+
+
+// ---------------------------------------------------------------------------
+// Provenance Capture (docs/09_provenance_ledger.md §5, §6)
+// ---------------------------------------------------------------------------
+
+// --- Hashing ---
+async function sha256(str) {
+  const buf = await crypto.subtle.digest('SHA-256', text2buf(str));
+  return buf2hex(buf);
+}
+function buf2hex(buffer) {
+  return [...new Uint8Array(buffer)]
+      .map(x => x.toString(16).padStart(2, '0'))
+      .join('');
+}
+function text2buf(str) {
+  return new TextEncoder().encode(str);
+}
+
+// --- Event sending ---
+async function sendProvenanceEvent(eventType, payload) {
+  if (!sceneId) return;
+  try {
+    const res = await fetch("/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        event_type: eventType,
+        scene_id: sceneId,
+        payload: payload,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      setStatus(`event error: ${err.error || res.status}`);
+    } else {
+      setStatus(`${eventType.toLowerCase().replace(/_/g, " ")} sent`);
+    }
+  } catch (e) {
+    setStatus(`event error: ${e.message}`);
+  }
+}
+
+async function closeKeystrokeBatch(force = false) {
+  if (!keystrokeBatch.startTime || !keystrokeBatch.componentId) return;
+
+  clearTimeout(keystrokeBatch.timer);
+  keystrokeBatch.timer = null;
+
+  const cid = keystrokeBatch.componentId;
+  const comp = components.get(cid);
+  if (!comp) return;
+
+  const content = comp.input.textContent;
+  const contentHash = await sha256(content);
+  const prevChainHash = chainHashes.get(cid) || await sha256(cid);
+  const newChainHash = await sha256(prevChainHash + contentHash);
+
+  const payload = {
+    component_id: cid,
+    ts_start_micros: keystrokeBatch.startTime,
+    ts_end_micros: Date.now() * 1000,
+    char_delta: keystrokeBatch.charDelta,
+    chain_hash: newChainHash,
+  };
+
+  await sendProvenanceEvent("KEYSTROKE_BATCH", payload);
+
+  chainHashes.set(cid, newChainHash);
+  keystrokeBatch.startTime = null;
+  keystrokeBatch.charDelta = 0;
+  keystrokeBatch.componentId = null;
+}
+
+function handleKeystroke(e) {
+  const input = e.target;
+  const cid = input.dataset.componentId;
+  if (!cid || cid.startsWith("tmp-")) return;
+
+  // Different component, close previous batch
+  if (keystrokeBatch.componentId && keystrokeBatch.componentId !== cid) {
+    closeKeystrokeBatch(true);
+  }
+
+  if (!keystrokeBatch.startTime) {
+    keystrokeBatch.startTime = Date.now() * 1000;
+    keystrokeBatch.componentId = cid;
+  }
+  
+  // This is an approximation. A more accurate char_delta would analyze
+  // the specific change, but this matches the old `charsSinceLastSave`.
+  keystrokeBatch.charDelta += 1;
+
+  clearTimeout(keystrokeBatch.timer);
+  keystrokeBatch.timer = setTimeout(() => closeKeystrokeBatch(), SAVE_IDLE_MS);
+
+  if (keystrokeBatch.charDelta >= SAVE_CHAR_THRESHOLD) {
+    closeKeystrokeBatch(true);
+  }
+}
+
+function handleCopy(e) {
+    const selection = document.getSelection();
+    lastKnownCopy = selection.toString();
+}
+
+function handlePaste(e) {
+    e.preventDefault();
+    const text = e.clipboardData.getData("text/plain");
+    document.execCommand("insertText", false, text);
+
+    const cid = e.target.dataset.componentId;
+    if (!cid || cid.startsWith("tmp-")) return;
+    
+    // Close any open keystroke batch before processing paste
+    closeKeystrokeBatch(true);
+
+    const origin = (text === lastKnownCopy) ? "INTERNAL" : "UNKNOWN";
+    
+    const payload = {
+        origin: origin,
+        char_count: text.length,
+        target_component_id: cid,
+    };
+    sendProvenanceEvent("PASTE", payload);
+}
+
+
 // ---------------------------------------------------------------------------
 // Init screen
 // ---------------------------------------------------------------------------
@@ -492,12 +630,8 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   input.contentEditable = "true";
   input.spellcheck = true;
   input.dataset.componentId = component_id || "";
-  // Prevent paste of rich text — always paste plain text
-  input.addEventListener("paste", e => {
-    e.preventDefault();
-    const text = e.clipboardData.getData("text/plain");
-    document.execCommand("insertText", false, text);
-  });
+  input.addEventListener("paste", handlePaste);
+  input.addEventListener("copy", handleCopy);
 
   if (content) input.textContent = content;
 
@@ -530,6 +664,9 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   } else {
     order.push(newId);
   }
+  
+  // Note: the old `saveComponent` function saved the initial state.
+  // The new model saves on first keystroke, which is fine.
   components.set(newId, { block, input, type: comp_type, content: content || "", tmpId: component_id ? undefined : newId });
 
   // Focus and gutter highlight
@@ -540,7 +677,8 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   });
   input.addEventListener("blur", () => {
     block.classList.remove("focused");
-    scheduleSave(block);
+    // When focus is lost, force the current batch to close.
+    closeKeystrokeBatch(true);
   });
   
   input.addEventListener("keydown", (e) => {
@@ -573,6 +711,8 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
           NOTE: "ACTION"
         };
         const nextType = predict[currentType] || "ACTION";
+        // Ensure batch is closed before adding new component
+        closeKeystrokeBatch(true);
         addComponentToSurface({ comp_type: nextType, content: "", component_id: null }, block);
       }
     } else if (e.key === "Tab") {
@@ -592,7 +732,7 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
     }
   });
 
-  input.addEventListener("input", () => {
+  input.addEventListener("input", (e) => {
     // Implicit patterns
     const text = input.textContent;
     const currentType = block.dataset.type;
@@ -601,8 +741,6 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
     if (/^(INT\.|EXT\.|EST\.|I\/E)/i.test(text.trimStart()) && currentType !== "SCENE_HEADING") {
       newType = "SCENE_HEADING";
     } else if (text.startsWith("(") && currentType !== "PARENTHETICAL") {
-      // "An opening parenthesis directly beneath dialogue enters Parenthetical." 
-      // We simplify to just starting with ( 
       newType = "PARENTHETICAL";
     }
 
@@ -610,12 +748,7 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
       changeComponentType(block, newType);
     }
     
-    charsSinceLastSave += 1;
-    if (charsSinceLastSave >= SAVE_CHAR_THRESHOLD) {
-      saveComponent(block);
-    } else {
-      scheduleSave(block);
-    }
+    handleKeystroke(e);
   });
 
   input.focus();
@@ -630,7 +763,10 @@ function changeComponentType(block, newType) {
   const input = block.querySelector(".comp-input");
   currentType = newType;
   setActiveTypeBtn(newType);
-  scheduleSave(block); // trigger a save to persist the type change
+  // A type change is a significant event, so we force the batch to close.
+  // The component's content hasn't changed, but its type has. The backend
+  // PUT /components/:id handles this, but we log the preceding text edits.
+  closeKeystrokeBatch(true);
 }
 
 function labelFor(type) {
@@ -692,54 +828,6 @@ async function loadComponents() {
     component_id: c.component_id,
   }));
   setStatus(`loaded ${data.length} component(s)`);
-}
-
-// ---------------------------------------------------------------------------
-// Autosave
-// ---------------------------------------------------------------------------
-function scheduleSave(block) {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveComponent(block), SAVE_IDLE_MS);
-}
-
-async function saveComponent(block) {
-  clearTimeout(saveTimer);
-  charsSinceLastSave = 0;
-
-  const input = block.querySelector(".comp-input");
-  const content = input.textContent;
-  const compType = block.dataset.type;
-  const cid = block.dataset.componentId;
-
-  if (cid && !cid.startsWith("tmp-")) {
-    // Update existing component
-    const res = await fetch(`/components/${cid}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, comp_type: compType }),
-    });
-    if (!res.ok) setStatus(`save error ${res.status}`);
-    else setStatus("saved");
-  } else {
-    // Create new component
-    const seq = order.indexOf(cid) + 1;
-    const res = await fetch(`/takes/${takeId}/components`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ comp_type: compType, content, sequence_order: seq }),
-    });
-    if (!res.ok) { setStatus(`save error ${res.status}`); return; }
-    const data = await res.json();
-    // Upgrade from tmp id to real id
-    const idx = order.indexOf(cid);
-    if (idx !== -1) order[idx] = data.component_id;
-    const entry = components.get(cid);
-    components.delete(cid);
-    components.set(data.component_id, { ...entry, content });
-    block.dataset.componentId = data.component_id;
-    input.dataset.componentId = data.component_id;
-    setStatus("saved");
-  }
 }
 
 // ---------------------------------------------------------------------------

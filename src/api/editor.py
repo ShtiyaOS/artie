@@ -20,6 +20,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from src.supabase_client import get_client as get_supabase
 from src.fountain.emit import emit_fountain
+from src.confluent_producer import publish_event
+from src.clickhouse_client import get_client as get_clickhouse
+from src.confluent_producer import publish_event
+from src.clickhouse_client import get_client as get_clickhouse
 
 router = APIRouter()
 
@@ -280,3 +284,83 @@ async def export_fountain(take_id: str) -> PlainTextResponse:
     )
     fountain_text = emit_fountain(result.data)
     return PlainTextResponse(fountain_text, media_type="text/plain; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Provenance events (keystroke, paste)
+# ---------------------------------------------------------------------------
+
+async def _get_project_id_for_scene(scene_id: str) -> str | None:
+    """Fetch the project_id for a given scene_id."""
+    db = get_supabase()
+    result = db.table("scenes").select("project_id").eq("scene_id", scene_id).limit(1).execute()
+    if result.data:
+        return result.data[0]["project_id"]
+    return None
+
+@router.post("/events")
+async def post_event(request: Request) -> JSONResponse:
+    """
+    Receive a provenance event from the editor.
+
+    docs/09_provenance_ledger.md §5, §6
+
+    Body:
+      {
+        "event_type": "KEYSTROKE_BATCH" | "PASTE",
+        "scene_id": "uuid",
+        "payload": { ... }
+      }
+    """
+    body = await request.json()
+    event_type = body.get("event_type")
+    scene_id = body.get("scene_id")
+    payload = body.get("payload", {})
+
+    if not all([event_type, scene_id, payload is not None]):
+        return JSONResponse({"error": "event_type, scene_id, and payload are required"}, status_code=400)
+
+    project_id = await _get_project_id_for_scene(scene_id)
+    if not project_id:
+        return JSONResponse({"error": f"could not find project for scene {scene_id}"}, status_code=404)
+
+    if event_type == "KEYSTROKE_BATCH":
+        required_keys = {"component_id", "ts_start_micros", "ts_end_micros", "char_delta", "chain_hash"}
+        if not required_keys.issubset(payload.keys()):
+            return JSONResponse({"error": "missing keys in keystroke batch payload"}, status_code=400)
+
+        ch_client = get_clickhouse()
+        ch_client.insert(
+            "keystroke_batches",
+            [[
+                project_id,
+                scene_id,
+                payload["component_id"],
+                payload["ts_start_micros"],
+                payload["ts_end_micros"],
+                payload["char_delta"],
+                payload["chain_hash"],
+            ]],
+            column_names=[
+                "project_id", "scene_id", "component_id",
+                "ts_start_micros", "ts_end_micros", "char_delta", "content_hash"
+            ],
+        )
+        return JSONResponse({"status": "keystroke batch recorded"}, status_code=202)
+
+    elif event_type == "PASTE":
+        required_keys = {"origin", "char_count", "target_component_id"}
+        if not required_keys.issubset(payload.keys()):
+            return JSONResponse({"error": "missing keys in paste payload"}, status_code=400)
+
+        publish_event(
+            event_type="PASTE",
+            actor="human",
+            payload=payload,
+            project_id=project_id,
+            scene_id=scene_id,
+        )
+        return JSONResponse({"status": "paste event published"}, status_code=202)
+
+    else:
+        return JSONResponse({"error": f"unknown event_type: {event_type}"}, status_code=400)
