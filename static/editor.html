@@ -111,6 +111,23 @@ body {
   flex-wrap: wrap;
 }
 
+#comp-toolbar.collapsed {
+  display: none;
+}
+
+#instructional-note {
+  font-size: 11px;
+  color: #666;
+  padding: 6px 16px;
+  background: #181818;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+#instructional-note a {
+  color: #8de88d;
+  text-decoration: none;
+}
+
 #comp-toolbar label {
   font-size: 11px;
   color: #666;
@@ -458,7 +475,7 @@ document.getElementById("btn-add-comp").addEventListener("click", () => {
   addComponentToSurface({ comp_type: currentType, content: "", component_id: null });
 });
 
-function addComponentToSurface({ comp_type, content, component_id }) {
+function addComponentToSurface({ comp_type, content, component_id }, afterBlock = null) {
   const surface = document.getElementById("script-surface");
 
   const block = document.createElement("div");
@@ -486,20 +503,34 @@ function addComponentToSurface({ comp_type, content, component_id }) {
 
   block.appendChild(gutter);
   block.appendChild(input);
-  surface.appendChild(block);
+  
+  if (afterBlock && afterBlock.nextSibling) {
+    surface.insertBefore(block, afterBlock.nextSibling);
+  } else {
+    surface.appendChild(block);
+  }
 
   // Track order
-  if (component_id) {
-    order.push(component_id);
-    components.set(component_id, { block, input, type: comp_type, content });
-  } else {
+  let newId = component_id;
+  if (!newId) {
     // New unsaved component — assign a temporary id
-    const tmpId = "tmp-" + crypto.randomUUID();
-    block.dataset.componentId = tmpId;
-    input.dataset.componentId = tmpId;
-    order.push(tmpId);
-    components.set(tmpId, { block, input, type: comp_type, content: "", tmpId });
+    newId = "tmp-" + crypto.randomUUID();
+    block.dataset.componentId = newId;
+    input.dataset.componentId = newId;
   }
+  
+  if (afterBlock) {
+    const prevId = afterBlock.dataset.componentId;
+    const idx = order.indexOf(prevId);
+    if (idx !== -1) {
+      order.splice(idx + 1, 0, newId);
+    } else {
+      order.push(newId);
+    }
+  } else {
+    order.push(newId);
+  }
+  components.set(newId, { block, input, type: comp_type, content: content || "", tmpId: component_id ? undefined : newId });
 
   // Focus and gutter highlight
   input.addEventListener("focus", () => {
@@ -511,7 +542,74 @@ function addComponentToSurface({ comp_type, content, component_id }) {
     block.classList.remove("focused");
     scheduleSave(block);
   });
+  
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const content = input.textContent.trim();
+      const currentType = block.dataset.type;
+      
+      if (content === "") {
+        // Fall-through on empty
+        const fallThrough = {
+          SCENE_HEADING: "ACTION",
+          ACTION: "SCENE_HEADING",
+          CHARACTER: "ACTION",
+          DIALOGUE: "ACTION",
+          PARENTHETICAL: "ACTION",
+          TRANSITION: "ACTION",
+          NOTE: "ACTION"
+        };
+        changeComponentType(block, fallThrough[currentType]);
+      } else {
+        // Predictive advance
+        const predict = {
+          SCENE_HEADING: "ACTION",
+          ACTION: "ACTION",
+          CHARACTER: "DIALOGUE",
+          DIALOGUE: "CHARACTER",
+          PARENTHETICAL: "DIALOGUE",
+          TRANSITION: "SCENE_HEADING",
+          NOTE: "ACTION"
+        };
+        const nextType = predict[currentType] || "ACTION";
+        addComponentToSurface({ comp_type: nextType, content: "", component_id: null }, block);
+      }
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      // Manual cycle
+      const cycle = {
+        ACTION: "CHARACTER",
+        CHARACTER: "PARENTHETICAL",
+        PARENTHETICAL: "DIALOGUE",
+        DIALOGUE: "TRANSITION",
+        TRANSITION: "SCENE_HEADING",
+        SCENE_HEADING: "ACTION",
+        NOTE: "ACTION"
+      };
+      changeComponentType(block, cycle[block.dataset.type]);
+      recordTabPress();
+    }
+  });
+
   input.addEventListener("input", () => {
+    // Implicit patterns
+    const text = input.textContent;
+    const currentType = block.dataset.type;
+    let newType = null;
+    
+    if (/^(INT\.|EXT\.|EST\.|I\/E)/i.test(text.trimStart()) && currentType !== "SCENE_HEADING") {
+      newType = "SCENE_HEADING";
+    } else if (text.startsWith("(") && currentType !== "PARENTHETICAL") {
+      // "An opening parenthesis directly beneath dialogue enters Parenthetical." 
+      // We simplify to just starting with ( 
+      newType = "PARENTHETICAL";
+    }
+
+    if (newType) {
+      changeComponentType(block, newType);
+    }
+    
     charsSinceLastSave += 1;
     if (charsSinceLastSave >= SAVE_CHAR_THRESHOLD) {
       saveComponent(block);
@@ -522,6 +620,17 @@ function addComponentToSurface({ comp_type, content, component_id }) {
 
   input.focus();
   return block;
+}
+
+function changeComponentType(block, newType) {
+  block.dataset.type = newType;
+  const gutter = block.querySelector(".comp-gutter");
+  gutter.textContent = labelFor(newType);
+  
+  const input = block.querySelector(".comp-input");
+  currentType = newType;
+  setActiveTypeBtn(newType);
+  scheduleSave(block); // trigger a save to persist the type change
 }
 
 function labelFor(type) {
@@ -535,6 +644,39 @@ function labelFor(type) {
     NOTE: "NOTE",
   };
   return labels[type] || type;
+}
+
+// ---------------------------------------------------------------------------
+// Instructional Mode
+// ---------------------------------------------------------------------------
+let tabPresses = 0;
+const TAB_COLLAPSE_THRESHOLD = 5;
+let instructionalCollapsed = false;
+
+function recordTabPress() {
+  if (instructionalCollapsed) return;
+  tabPresses++;
+  if (tabPresses >= TAB_COLLAPSE_THRESHOLD) {
+    collapseInstructionalMode();
+  }
+}
+
+function collapseInstructionalMode() {
+  instructionalCollapsed = true;
+  const toolbar = document.getElementById("comp-toolbar");
+  toolbar.classList.add("collapsed");
+  // Show a one-line note
+  let note = document.getElementById("instructional-note");
+  if (!note) {
+    note = document.createElement("div");
+    note.id = "instructional-note";
+    note.innerHTML = `Mode palette hidden. <a href="#" id="toggle-palette">Show palette</a>`;
+    toolbar.parentNode.insertBefore(note, toolbar.nextSibling);
+    document.getElementById("toggle-palette").addEventListener("click", (e) => {
+      e.preventDefault();
+      toolbar.classList.toggle("collapsed");
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
