@@ -4,6 +4,7 @@ The Director — visualization agent wrapper.
 docs/04_agent_roster.md §5   — responsibilities, isolation rule, model
 docs/05_orchestration.md §1  — flat topology, peer of Artie and Supervisor
 docs/05_orchestration.md §5.4 — Backend → Director payload contract
+docs/13_director_assets.md §5,8 — Image generation and failure handling.
 
 The Director is a SequentialAgent pipeline (per docs/05_orchestration.md §1):
   prompt construction → image generation → assumption note
@@ -11,17 +12,19 @@ The Director is a SequentialAgent pipeline (per docs/05_orchestration.md §1):
 Isolation rule (docs/04_agent_roster.md §5): the Director reads Action lines only —
 no dialogue, no Bible, no Rig slots. The payload contract enforces this.
 
-Provenance event emitted by the wrapper: FRAME_PROMPT_CONSTRUCTED.
-FRAME_GENERATED is emitted when the image pipeline runs (later task).
-The agent never emits its own provenance events.
+Provenance events emitted:
+- FRAME_PROMPT_CONSTRUCTED: emitted by `invoke()`
+- FRAME_GENERATED: emitted by `generate_frame()`
 """
 
+import asyncio
 import json
 import logging
 import os
 import re
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Tuple
 
+from google import genai
 from google.adk.agents import LlmAgent
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
@@ -31,6 +34,82 @@ from src.agents.runner import _adk_model, invoke_agent
 logger = logging.getLogger(__name__)
 
 APP_NAME = "director"
+
+# --------------------------------------------------------------------------
+# Image Generation
+# --------------------------------------------------------------------------
+
+async def generate_frame(
+    *,
+    prompt: str,
+    user_id: str,
+    session_service: InMemorySessionService,
+    project_id: str | None = None,
+    scene_id: str | None = None,
+    bible_version_id: int = 0,
+    is_demo_frame: bool = False,
+) -> Tuple[bytes | None, str]:
+    """
+    Sends the prompt to the image model and returns the image bytes.
+
+    Emits FRAME_GENERATED event for all outcomes.
+    """
+    image_bytes = None
+    finish_reason = "UNKNOWN"
+    extra_provenance = {}
+
+    try:
+        # Per user instruction, instantiate client and call client.models.generate_content
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        model_name = os.environ["GEMINI_IMAGE_MODEL"]
+
+        # Per docs/13_director_assets.md §5
+        generation_prompt = f"{prompt}, 16:9 aspect ratio, {'2K' if is_demo_frame else '1K'} resolution"
+        
+        # Running the sync call in an executor to avoid blocking the event loop.
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=model_name,
+            contents=generation_prompt,
+        )
+        
+        if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+            finish_reason = f"BLOCK_REASON_{response.prompt_feedback.block_reason.name}"
+            extra_provenance["block_reason"] = response.prompt_feedback.block_reason.name
+        
+        elif response.candidates:
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason.name
+            extra_provenance["finish_reason_raw"] = candidate.finish_reason.value
+
+            if finish_reason == "STOP":
+                for part in candidate.content.parts:
+                    if hasattr(part, "inline_data") and part.inline_data:
+                        image_bytes = part.inline_data.data
+                        break
+        
+    except Exception as e:
+        logger.error(f"Image generation failed: {e}", exc_info=True)
+        finish_reason = "GENERATION_ERROR"
+        extra_provenance["error_message"] = str(e)
+
+    # Per docs/13_director_assets.md §8: "Every outcome emits FRAME_GENERATED"
+    session = await session_service.get_session(APP_NAME, user_id)
+    await session.emit_event(
+        "FRAME_GENERATED",
+        actor="director",
+        project_id=project_id,
+        scene_id=scene_id,
+        bible_version_id=bible_version_id,
+        extra_data={
+            "prompt": prompt,
+            "finish_reason": finish_reason,
+            **extra_provenance
+        },
+    )
+
+    return image_bytes, finish_reason
+
 
 # --------------------------------------------------------------------------
 # Prompt Construction Pipeline
@@ -101,7 +180,7 @@ async def _construct_prompt(payload: dict[str, Any]) -> dict[str, str]:
     # 3. Select the moment
     instruction_select_moment = "You are given a piece of action from a screenplay. Select the single most important, photographable moment from the text. Output only the description of that single moment."
     action_text = await _call_llm_for_step(instruction_select_moment, action_text)
-    assumption_notes.append(f"Moment selected: \"{action_text}\"")
+    assumption_notes.append(f'Moment selected: \"{action_text}\"')
 
     # 4. Drop interiority
     instruction_drop_interiority = "You are given a piece of action from a screenplay. Remove any unfilmable interior thoughts or feelings. Output only the filmable action."
@@ -158,7 +237,7 @@ async def invoke(
     bible_version_id: int = 0,
 ) -> str | None:
     """
-    Invoke the Director with a Backend → Director payload
+    Invoke the Director to construct a prompt from a Backend payload
     (docs/05_orchestration.md §5.4).
 
     Payload must contain:

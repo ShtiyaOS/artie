@@ -2,11 +2,13 @@
 Tests for the Director agent.
 """
 
+import asyncio
+import os
 import unittest
 import json
 
 import pytest
-from unittest.mock import patch, MagicMock, ANY
+from unittest.mock import patch, MagicMock, ANY, PropertyMock, AsyncMock
 
 from src.agents import director
 
@@ -50,6 +52,7 @@ async def test_construct_prompt_pipeline(mock_call_llm):
     assert "Moment selected:" in result["assumption_note"]
     assert mock_call_llm.call_count == 3
 
+@patch.dict("os.environ", {"GEMINI_TEXT_MODEL": "models/gemini-3.5-flash", "GEMINI_IMAGE_MODEL": "models/gemini-3-pro-image", "GEMINI_API_KEY": "test-key"})
 @pytest.mark.asyncio
 @patch('src.agents.director._construct_prompt')
 @patch('src.agents.director.invoke_agent')
@@ -91,3 +94,181 @@ async def test_invoke_calls_pipeline_and_agent(mock_invoke_agent, mock_construct
     )
     assert result == json.dumps(constructed_data)
 
+
+# ------------------------------------------------------------------------------
+# Mock Response Objects (for genai.Client pattern)
+# ------------------------------------------------------------------------------
+class MockInlineData:
+    def __init__(self, data=b'imagedata', mime_type='image/jpeg'):
+        self.data = data
+        self.mime_type = mime_type
+
+class MockPart:
+    def __init__(self, with_inline_data=True):
+        if with_inline_data:
+            self.inline_data = MockInlineData()
+
+class MockContent:
+    def __init__(self, parts=None):
+        self.parts = parts if parts is not None else [MockPart()]
+
+class MockCandidate:
+    def __init__(self, finish_reason_str="STOP", content=None):
+        self.finish_reason = MagicMock()
+        self.finish_reason.name = finish_reason_str
+        self.finish_reason.value = 1 # Dummy value
+        self.content = content if content is not None else MockContent()
+
+class MockPromptFeedback:
+    def __init__(self, block_reason=None):
+        self.block_reason = None
+        if block_reason:
+            self.block_reason = MagicMock()
+            self.block_reason.name = block_reason
+
+class MockGenAIResponse:
+    def __init__(self, candidates=None, prompt_feedback=None):
+        self.candidates = candidates if candidates is not None else [MockCandidate()]
+        # Use hasattr to check for prompt_feedback because the real object may not have it on success
+        if prompt_feedback is not None:
+            self.prompt_feedback = prompt_feedback
+        else:
+            self.prompt_feedback = None
+
+# ------------------------------------------------------------------------------
+# Image Generation Tests
+# ------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@patch.dict(os.environ, {"GEMINI_API_KEY": "test_key", "GEMINI_IMAGE_MODEL": "gemini-test-model"})
+@patch('src.agents.director.genai.Client')
+async def test_generate_frame_success(mock_genai_client):
+    """
+    Tests the happy path for image generation using the client pattern.
+    """
+    # Assemble
+    mock_client_instance = mock_genai_client.return_value
+    mock_client_instance.models.generate_content.return_value = MockGenAIResponse()
+
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+
+    # Act
+    image_bytes, finish_reason = await director.generate_frame(
+        prompt="A test prompt",
+        user_id="test_user",
+        session_service=mock_session_service,
+        project_id="p1",
+        scene_id="s1",
+        is_demo_frame=True,
+    )
+
+    # Assert
+    mock_genai_client.assert_called_with(api_key='test_key')
+    mock_client_instance.models.generate_content.assert_called_once()
+    call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+    assert "2K resolution" in call_kwargs['contents']
+    assert call_kwargs['model'] == 'gemini-test-model'
+    
+    assert image_bytes == b'imagedata'
+    assert finish_reason == "STOP"
+    
+    mock_session_service.get_session.assert_awaited_once_with("director", "test_user")
+    mock_session.emit_event.assert_awaited_once()
+    event_name, event_kwargs = mock_session.emit_event.call_args
+    assert event_name[0] == "FRAME_GENERATED"
+    assert event_kwargs['extra_data']['finish_reason'] == "STOP"
+
+@pytest.mark.asyncio
+@patch.dict(os.environ, {"GEMINI_API_KEY": "test_key", "GEMINI_IMAGE_MODEL": "gemini-test-model"})
+@patch('src.agents.director.genai.Client')
+async def test_generate_frame_blocked_prompt(mock_genai_client):
+    """
+    Tests failure handling for a blocked prompt.
+    """
+    # Assemble
+    mock_client_instance = mock_genai_client.return_value
+    mock_client_instance.models.generate_content.return_value = MockGenAIResponse(
+        prompt_feedback=MockPromptFeedback(block_reason="SAFETY"),
+        candidates=[] # No candidates when prompt is blocked
+    )
+
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+    
+    # Act
+    image_bytes, finish_reason = await director.generate_frame(
+        prompt="A naughty prompt", user_id="test_user", session_service=mock_session_service
+    )
+
+    # Assert
+    assert image_bytes is None
+    assert finish_reason == "BLOCK_REASON_SAFETY"
+    
+    mock_session.emit_event.assert_awaited_once()
+    _, event_kwargs = mock_session.emit_event.call_args
+    assert event_kwargs['extra_data']['finish_reason'] == "BLOCK_REASON_SAFETY"
+
+@pytest.mark.asyncio
+@patch.dict(os.environ, {"GEMINI_API_KEY": "test_key", "GEMINI_IMAGE_MODEL": "gemini-test-model"})
+@patch('src.agents.director.genai.Client')
+async def test_generate_frame_finish_reason_safety(mock_genai_client):
+    """
+    Tests failure handling for an image withheld due to safety reasons.
+    """
+    # Assemble
+    mock_client_instance = mock_genai_client.return_value
+    mock_client_instance.models.generate_content.return_value = MockGenAIResponse(
+        candidates=[MockCandidate(finish_reason_str="SAFETY", content=MockContent(parts=[]))]
+    )
+
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+
+    # Act
+    image_bytes, finish_reason = await director.generate_frame(
+        prompt="A prompt", user_id="test_user", session_service=mock_session_service
+    )
+
+    # Assert
+    assert image_bytes is None
+    assert finish_reason == "SAFETY"
+    
+    mock_session.emit_event.assert_awaited_once()
+    _, event_kwargs = mock_session.emit_event.call_args
+    assert event_kwargs['extra_data']['finish_reason'] == "SAFETY"
+
+@pytest.mark.asyncio
+@patch.dict(os.environ, {"GEMINI_API_KEY": "test_key", "GEMINI_IMAGE_MODEL": "gemini-test-model"})
+@patch('src.agents.director.genai.Client')
+async def test_generate_frame_api_exception(mock_genai_client):
+    """
+    Tests failure handling when the API call raises an exception.
+    """
+    # Assemble
+    mock_client_instance = mock_genai_client.return_value
+    mock_client_instance.models.generate_content.side_effect = ValueError("API Error")
+
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+
+    # Act
+    image_bytes, finish_reason = await director.generate_frame(
+        prompt="A prompt", user_id="test_user", session_service=mock_session_service
+    )
+
+    # Assert
+    assert image_bytes is None
+    assert finish_reason == "GENERATION_ERROR"
+    
+    mock_session.emit_event.assert_awaited_once()
+    _, event_kwargs = mock_session.emit_event.call_args
+    assert event_kwargs['extra_data']['finish_reason'] == "GENERATION_ERROR"
