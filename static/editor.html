@@ -55,7 +55,7 @@ body {
 
 /* Left pane — scene navigator (stub for Task 28) */
 #left-pane {
-  width: 200px;
+  width: 280px; /* Wider for heatmap */
   background: #161616;
   border-right: 1px solid #2a2a2a;
   padding: 12px 8px;
@@ -63,7 +63,7 @@ body {
   color: #555;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 18px; /* Increased gap */
   flex-shrink: 0;
 }
 
@@ -74,6 +74,62 @@ body {
   font-size: 10px;
   padding-bottom: 4px;
   border-bottom: 1px solid #2a2a2a;
+}
+
+/* Heatmap styles */
+#heatmap-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-template-rows: repeat(6, 1fr);
+  gap: 2px;
+  border: 1px solid #2a2a2a;
+  padding: 2px;
+}
+.heatmap-cell {
+  width: 100%;
+  padding-top: 100%; /* Aspect ratio 1:1 */
+  position: relative;
+  background: #222; /* default for NO_DATA */
+  border: 1px solid #161616;
+}
+.heatmap-cell[data-state="SATISFIED"] { background-color: #3a5a3a; }
+.heatmap-cell[data-state="GAP"] { background-color: #8a3a3a; }
+.heatmap-cell[data-state="NA"] { background-color: #333; }
+.heatmap-cell[data-state="NO_DATA"] { background-color: #222; }
+
+/* Confidence styles */
+.heatmap-cell[data-confidence="ATTESTED"] { border-style: solid; }
+.heatmap-cell[data-confidence="ANCHORED"] { border-style: dashed; }
+.heatmap-cell[data-confidence="EXTRAPOLATED"] { border-style: dotted; }
+.heatmap-cell { border-color: #555; }
+.heatmap-cell[data-state="SATISFIED"] { border-color: #8de88d; }
+
+
+#heatmap-axes {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #444;
+    padding: 0 4px;
+}
+
+#heatmap-lenses {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 9px;
+    color: #444;
+    text-align: right;
+    padding-right: 4px;
+}
+
+#heatmap-wrapper {
+    display: flex;
 }
 
 /* Centre pane — Artie stub */
@@ -363,6 +419,10 @@ body {
 <div id="init-screen">
   <h2>Script Writer Pro — Workbench</h2>
   <div class="init-field">
+    <label>Project ID (UUID)</label>
+    <input type="text" id="input-project-id" placeholder="leave blank to auto-generate">
+  </div>
+  <div class="init-field">
     <label>Scene ID (UUID)</label>
     <input type="text" id="input-scene-id" placeholder="leave blank to auto-generate">
   </div>
@@ -389,6 +449,16 @@ body {
   <div id="left-pane">
     <div class="pane-title">Navigator</div>
     <span style="color:#333">(Task 29+)</span>
+    <div id="heatmap-container">
+        <div class="pane-title">Coverage Heatmap</div>
+        <div id="heatmap-wrapper">
+            <div id="heatmap-lenses"></div>
+            <div style="flex: 1;">
+                <div id="heatmap-grid"></div>
+                <div id="heatmap-axes"></div>
+            </div>
+        </div>
+    </div>
   </div>
 
   <!-- Centre: Artie stub -->
@@ -434,6 +504,7 @@ const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+let projectId = null;
 let sceneId = null;
 let takeId = null;
 let currentType = "ACTION";
@@ -460,6 +531,71 @@ const chainHashes = new Map(); // component_id -> hash
 // Inactivity and Return Beacon state
 let inactivityTimer = null;
 let isAbsent = false;
+
+
+// ---------------------------------------------------------------------------
+// Heatmap
+// ---------------------------------------------------------------------------
+async function loadHeatmap() {
+    if (!projectId) return;
+    setStatus("loading heatmap…");
+    try {
+        const res = await fetch(`/project/${projectId}/heatmap`);
+        if (!res.ok) {
+            setStatus("heatmap error");
+            return;
+        }
+        const data = await res.json();
+        renderHeatmap(data);
+        setStatus("heatmap loaded.");
+    } catch (e) {
+        setStatus(`heatmap error: ${e.message}`);
+    }
+}
+
+function renderHeatmap(data) {
+    const grid = document.getElementById("heatmap-grid");
+    const axes = document.getElementById("heatmap-axes");
+    const lenses = document.getElementById("heatmap-lenses");
+    grid.innerHTML = "";
+    axes.innerHTML = "";
+    lenses.innerHTML = "";
+
+    const POSITIONS = Array.from({length: 12}, (_, i) => `X${String(i + 1).padStart(2, '0')}`);
+    const LENSES = ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6"];
+    const LENS_NAMES = ["Structure", "Conflict", "Character", "Theme", "Dialogue", "Visual"];
+
+    // Create a map for quick lookup
+    const cellData = new Map();
+    data.forEach(d => cellData.set(`${d.position}-${d.lens}`, d));
+
+    // Populate grid
+    LENSES.forEach(lensCode => {
+        POSITIONS.forEach(posCode => {
+            const cellId = `${posCode}-${lensCode}`;
+            const cellInfo = cellData.get(cellId) || { coverage_state: 'NO_DATA', display_confidence: 'EXTRAPOLATED' };
+            const cell = document.createElement("div");
+            cell.className = "heatmap-cell";
+            cell.dataset.state = cellInfo.coverage_state;
+            cell.dataset.confidence = cellInfo.display_confidence;
+            cell.title = `${cellId}: ${cellInfo.coverage_state} (${cellInfo.display_confidence})`;
+            grid.appendChild(cell);
+        });
+    });
+    
+    // Populate axes
+    POSITIONS.forEach(posCode => {
+        const label = document.createElement("span");
+        label.textContent = posCode.substring(1);
+        axes.appendChild(label);
+    });
+
+    LENS_NAMES.forEach(lensName => {
+        const label = document.createElement("div");
+        label.textContent = lensName;
+        lenses.appendChild(label);
+    });
+}
 
 
 // ---------------------------------------------------------------------------
@@ -586,6 +722,8 @@ document.getElementById("btn-submit").addEventListener("click", async () => {
       const result = await res.json();
       setStatus(`Submitted. Diagnosis ID: ${result.diagnosis_id.slice(0,8)}…`);
       document.getElementById("btn-submit").disabled = true;
+      // Refresh heatmap after submit
+      loadHeatmap();
     }
   } catch (e) {
     setStatus(`submit error: ${e.message}`);
@@ -736,10 +874,20 @@ function handlePaste(e) {
 // Init screen
 // ---------------------------------------------------------------------------
 document.getElementById("btn-open").addEventListener("click", async () => {
+  const rawProject = document.getElementById("input-project-id").value.trim();
   const rawScene = document.getElementById("input-scene-id").value.trim();
   const rawTake  = document.getElementById("input-take-id").value.trim();
 
+  projectId = rawProject || crypto.randomUUID();
   sceneId = rawScene || crypto.randomUUID();
+
+  // We need to open a session with the project_id to associate events correctly.
+  await fetch("/session/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, slug_line: `Scene: ${sceneId}` }),
+  });
+
 
   if (rawTake) {
     takeId = rawTake;
@@ -758,9 +906,12 @@ document.getElementById("btn-open").addEventListener("click", async () => {
     takeId = data.take_id;
     setStatus(`take ${data.take_number} created`);
   }
+  
+  // Now that we have a project, load the heatmap
+  await loadHeatmap();
 
   document.getElementById("scene-label").textContent =
-    `scene ${sceneId.slice(0,8)}… / take ${takeId.slice(0,8)}…`;
+    `proj ${projectId.slice(0,8)}… / scene ${sceneId.slice(0,8)}… / take ${takeId.slice(0,8)}…`;
   document.getElementById("init-screen").style.display = "none";
   resetInactivityTimer();
 });

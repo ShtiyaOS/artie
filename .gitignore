@@ -29,3 +29,4 @@ CLAUDE.md
 *.prompt.md
 static/test_frame*
 static/test_*
+sql/04_dictionaries.sql

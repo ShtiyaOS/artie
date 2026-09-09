@@ -312,6 +312,26 @@ async def get_ranked_gaps(project_id: str, bible_version_id: int | None = None):
     return JSONResponse(gaps)
 
 
+@app.get("/project/{project_id}/heatmap")
+async def get_heatmap(project_id: str, bible_version_id: int | None = None):
+    """
+    Retrieve the coverage heatmap for a project.
+
+    Governed by docs/10_clickhouse.md §5.2.
+    """
+    from src.clickhouse_client import get_coverage_heatmap
+    
+    version = bible_version_id if bible_version_id is not None else _current_bible_version(project_id)
+    
+    # Environment guard for ClickHouse
+    if not os.environ.get("CLICKHOUSE_HOST"):
+        logger.warning("CLICKHOUSE_HOST not set; returning empty heatmap.")
+        return JSONResponse([])
+
+    heatmap = get_coverage_heatmap(project_id, version)
+    return JSONResponse(heatmap)
+
+
 # ---------------------------------------------------------------------------
 # Agent invocation endpoints — docs/05_orchestration.md §1
 # Each agent is a peer; the backend orchestrates, never Artie.
