@@ -55,7 +55,9 @@ Fifteen specifications in [`docs/`](docs/). Start with
 
 See `.env.example` for required configuration.
 
+```
 ./setup.sh
+```
 
 Schema in `sql/`, applied in numeric order. Tests: `python -m pytest -q`.
 
