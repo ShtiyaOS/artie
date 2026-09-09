@@ -6,7 +6,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from src.deliberation import apply_disposition_weights, synthesize
+from src.deliberation import apply_disposition_weights, get_active_axes, synthesize
 
 
 def test_apply_disposition_weights():
@@ -87,3 +87,42 @@ async def test_synthesize():
         mock_get_commitment_state.assert_called_once_with(project_id)
         mock_llm_agent.assert_called_once()
         mock_agent_instance.send.assert_called_once()
+
+def test_get_active_axes_no_findings():
+    """Tests that no axes are returned when there are no findings."""
+    payload = {}
+    assert get_active_axes(payload) == []
+
+def test_get_active_axes_pending_findings():
+    """Tests that A1 is returned when there are pending findings."""
+    payload = {"pending_findings": [{"status": "PENDING"}]}
+    assert get_active_axes(payload) == ["A1"]
+
+def test_get_active_axes_anchored_finding():
+    """Tests that A1 and A4 are returned when there is an anchored finding."""
+    payload = {"pending_findings": [{"status": "ANCHORED"}]}
+    assert get_active_axes(payload) == ["A1", "A4"]
+
+def test_get_active_axes_slot_value():
+    """Tests that A2 is returned when a slot value arrives."""
+    payload = {"gate": "GREENLIGHT", "slot_id": "test_slot"}
+    assert get_active_axes(payload) == ["A2"]
+
+def test_get_active_axes_a3_counter_placeholder():
+    """
+    Tests that A3 is not activated, as the logic is not yet implemented.
+    This test is a placeholder for when A3's counter logic is added.
+    """
+    # This payload would theoretically trigger A3 if it were implemented.
+    payload = {"hypothetical_A3_trigger": True}
+    assert "A3" not in get_active_axes(payload)
+
+def test_get_active_axes_two_axis_cap():
+    """Tests that the active axes are capped at two when three would qualify."""
+    payload = {
+        "pending_findings": [{"status": "PENDING"}, {"status": "ANCHORED"}],
+        "gate": "GREENLIGHT",
+        "slot_id": "test_slot"
+    }
+    # A1, A2, and A4 are all active. A1 and A4 have priority.
+    assert get_active_axes(payload) == ["A1", "A4"]
