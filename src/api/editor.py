@@ -13,6 +13,8 @@ no generated text ever enters these tables through this module.
 from __future__ import annotations
 
 import hashlib
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -22,8 +24,8 @@ from src.supabase_client import get_client as get_supabase
 from src.fountain.emit import emit_fountain
 from src.confluent_producer import publish_event
 from src.clickhouse_client import get_client as get_clickhouse
-from src.confluent_producer import publish_event
-from src.clickhouse_client import get_client as get_clickhouse
+from src.agents import supervisor
+
 
 router = APIRouter()
 
@@ -97,6 +99,80 @@ async def create_take(scene_id: str) -> JSONResponse:
     )
 
 
+@router.post("/takes/{take_id}/submit")
+async def submit_take(take_id: str) -> JSONResponse:
+    """
+    Mark a take as submitted, fire SCENE_SAVED, and invoke the Supervisor.
+
+    Returns the diagnosis_id from the Supervisor's response.
+    """
+    db = get_supabase()
+
+    # 1. Get take and related scene/project info
+    take_res = db.table("takes").select("*, scene:scenes(*)").eq("take_id", take_id).limit(1).execute()
+    if not take_res.data:
+        return JSONResponse({"error": "take not found"}, status_code=404)
+    
+    take = take_res.data[0]
+    scene = take["scene"]
+    if not scene:
+         return JSONResponse({"error": "scene not found for take"}, status_code=404)
+
+    scene_id = scene["scene_id"]
+    project_id = scene["project_id"]
+
+    # 2. Update take status
+    db.table("takes").update({"submitted_at": datetime.now(timezone.utc).isoformat()}).eq("take_id", take_id).execute()
+
+    # 3. Fire SCENE_SAVED event
+    publish_event(
+        event_type="SCENE_SAVED",
+        actor="human",
+        payload={"take_id": take_id, "take_number": take["take_number"]},
+        project_id=project_id,
+        scene_id=scene_id,
+    )
+
+    # 4. Get components and bible to form supervisor payload
+    components_res = db.table("script_components").select("*").eq("take_id", take_id).order("sequence_order").execute()
+    
+    # For now, we send an empty bible. This will be filled in later tasks.
+    bible_res = {"version_id": 0, "entries": []}
+    
+    # 5. Invoke Supervisor
+    supervisor_payload = {
+        "scene_id": scene_id,
+        "position_id": scene.get("position_id"),
+        "take_id": take_id,
+        "take_number": take["take_number"],
+        "components": components_res.data,
+        "bible_version_id": bible_res["version_id"],
+        "bible_entries": bible_res["entries"],
+        # Cells are also from another task, send empty for now.
+        "cells": [],
+    }
+
+    # A user_id is required, but this is a system action.
+    # We'll use a static identifier for now.
+    user_id = "editor-user" 
+    
+    supervisor_response_str = await supervisor.invoke(
+        payload=supervisor_payload,
+        user_id=user_id,
+        project_id=project_id,
+        scene_id=scene_id,
+        bible_version_id=bible_res["version_id"],
+    )
+
+    if not supervisor_response_str:
+        return JSONResponse({"error": "supervisor invocation failed"}, status_code=500)
+    
+    response_data = json.loads(supervisor_response_str)
+    diagnosis_id = response_data.get("diagnosis_id")
+
+    return JSONResponse({"status": "submitted", "diagnosis_id": diagnosis_id})
+
+
 @router.post("/takes/{take_id}/finalize")
 async def finalize_take(take_id: str) -> JSONResponse:
     """
@@ -156,6 +232,7 @@ async def get_take(take_id: str) -> JSONResponse:
     if not result.data:
         return JSONResponse({"error": "take not found"}, status_code=404)
     return JSONResponse(result.data[0])
+
 
 
 # ---------------------------------------------------------------------------

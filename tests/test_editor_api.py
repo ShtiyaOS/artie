@@ -423,6 +423,63 @@ class TestFountainExport:
 
 
 # ---------------------------------------------------------------------------
+# POST /takes/{take_id}/submit
+# ---------------------------------------------------------------------------
+
+class TestSubmitTake:
+    @patch("src.api.editor.supervisor.invoke")
+    @patch("src.api.editor.publish_event")
+    def test_submits_take_and_invokes_supervisor(self, mock_publish, mock_invoke, client):
+        # Arrange
+        scene_id = "scene-uuid-1"
+        take_id = "take-uuid-1"
+        project_id = "project-uuid-1"
+        diagnosis_id = "diag-uuid-123"
+
+        take_row = {
+            "take_id": take_id,
+            "take_number": 1,
+            "scene_id": scene_id,
+            "scene": {"scene_id": scene_id, "project_id": project_id}
+        }
+        components = [{"component_id": "c1", "content": "test"}]
+
+        db, chain = _mock_db([])
+        chain.execute.side_effect = [
+            MagicMock(data=[take_row]),      # get take with scene
+            MagicMock(data=None),            # update submitted_at
+            MagicMock(data=components),      # get components
+        ]
+
+        mock_invoke.return_value = f'{{"diagnosis_id": "{diagnosis_id}", "findings": {{}}}}'
+
+        # Act
+        with patch("src.api.editor.get_supabase", return_value=db):
+            res = client.post(f"/takes/{take_id}/submit")
+
+        # Assert
+        assert res.status_code == 200
+        assert res.json() == {"status": "submitted", "diagnosis_id": diagnosis_id}
+
+        # Assert DB update was called
+        update_call = chain.update.call_args
+        assert "submitted_at" in update_call.args[0]
+        
+        # Assert event was published
+        mock_publish.assert_called_once()
+        publish_args = mock_publish.call_args[1]
+        assert publish_args["event_type"] == "SCENE_SAVED"
+        assert publish_args["project_id"] == project_id
+        assert publish_args["scene_id"] == scene_id
+
+        # Assert supervisor was invoked
+        mock_invoke.assert_called_once()
+        invoke_args = mock_invoke.call_args[1]
+        assert invoke_args["payload"]["take_id"] == take_id
+        assert invoke_args["payload"]["components"][0]["component_id"] == "c1"
+
+
+# ---------------------------------------------------------------------------
 # GET /editor — serves the HTML page
 # ---------------------------------------------------------------------------
 

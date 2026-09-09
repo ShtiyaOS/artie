@@ -271,6 +271,16 @@ body {
 }
 #add-comp-bar button:hover { background: #2e2e2e; color: #aaa; }
 
+#btn-submit {
+  margin-left: auto;
+  background: #3a5a3a;
+  color: #8de88d;
+  border-color: #4a7a4a;
+}
+#btn-submit:hover {
+  background: #405f40;
+}
+
 /* ── Init screen ── */
 #init-screen {
   position: fixed;
@@ -394,6 +404,7 @@ body {
     <div id="add-comp-bar">
       <button id="btn-add-comp">+ Add Component</button>
       <button id="btn-export">Export Fountain</button>
+      <button id="btn-submit">Submit Scene</button>
     </div>
   </div>
 </div>
@@ -415,10 +426,7 @@ const components = new Map();
 const order = [];
 
 // Autosave state
-let saveTimer = null;
-const SAVE_IDLE_MS = 2000;
-const SAVE_CHAR_THRESHOLD = 200;
-let charsSinceLastSave = 0;
+const dirtyComponents = new Set();
 
 // Provenance state
 const keystrokeBatch = {
@@ -430,6 +438,77 @@ const keystrokeBatch = {
 let lastKnownCopy = "";
 const chainHashes = new Map(); // component_id -> hash
 
+
+// ---------------------------------------------------------------------------
+// Save & Submit
+// ---------------------------------------------------------------------------
+async function saveComponent(cid) {
+  const comp = components.get(cid);
+  if (!comp || comp.tmpId) return; // Don't save temp components
+
+  setStatus("saving…");
+  try {
+    const res = await fetch(`/components/${cid}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: comp.input.textContent,
+        comp_type: comp.type,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      setStatus(`save error: ${err.error || res.status}`);
+      return false;
+    }
+    setStatus("saved.");
+    return true;
+  } catch (e) {
+    setStatus(`save error: ${e.message}`);
+    return false;
+  }
+}
+
+async function saveDirtyComponents() {
+  if (dirtyComponents.size === 0) return;
+  
+  const dirtyArr = Array.from(dirtyComponents);
+  // Do them in parallel
+  const results = await Promise.all(dirtyArr.map(cid => saveComponent(cid)));
+
+  // Clear only the ones that saved successfully
+  results.forEach((success, i) => {
+    if (success) {
+      dirtyComponents.delete(dirtyArr[i]);
+    }
+  });
+}
+
+document.getElementById("btn-submit").addEventListener("click", async () => {
+  if (!takeId) return;
+
+  // Save any lingering changes first
+  await saveDirtyComponents();
+  if (dirtyComponents.size > 0) {
+    setStatus("save error, cannot submit.");
+    return;
+  }
+
+  setStatus("submitting…");
+  try {
+    const res = await fetch(`/takes/${takeId}/submit`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      setStatus(`submit error: ${err.error || res.status}`);
+    } else {
+      const result = await res.json();
+      setStatus(`Submitted. Diagnosis ID: ${result.diagnosis_id.slice(0,8)}…`);
+      document.getElementById("btn-submit").disabled = true;
+    }
+  } catch (e) {
+    setStatus(`submit error: ${e.message}`);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Provenance Capture (docs/09_provenance_ledger.md §5, §6)
@@ -466,7 +545,10 @@ async function sendProvenanceEvent(eventType, payload) {
       const err = await res.json();
       setStatus(`event error: ${err.error || res.status}`);
     } else {
-      setStatus(`${eventType.toLowerCase().replace(/_/g, " ")} sent`);
+      // Don't show status for keystrokes, it's too noisy
+      if (eventType !== "KEYSTROKE_BATCH") {
+        setStatus(`${eventType.toLowerCase().replace(/_/g, " ")} sent`);
+      }
     }
   } catch (e) {
     setStatus(`event error: ${e.message}`);
@@ -496,7 +578,11 @@ async function closeKeystrokeBatch(force = false) {
     chain_hash: newChainHash,
   };
 
-  await sendProvenanceEvent("KEYSTROKE_BATCH", payload);
+  // Provenance and autosave happen together
+  await Promise.all([
+      sendProvenanceEvent("KEYSTROKE_BATCH", payload),
+      saveDirtyComponents()
+  ]);
 
   chainHashes.set(cid, newChainHash);
   keystrokeBatch.startTime = null;
@@ -508,6 +594,8 @@ function handleKeystroke(e) {
   const input = e.target;
   const cid = input.dataset.componentId;
   if (!cid || cid.startsWith("tmp-")) return;
+  
+  dirtyComponents.add(cid);
 
   // Different component, close previous batch
   if (keystrokeBatch.componentId && keystrokeBatch.componentId !== cid) {
@@ -543,6 +631,8 @@ function handlePaste(e) {
 
     const cid = e.target.dataset.componentId;
     if (!cid || cid.startsWith("tmp-")) return;
+
+    dirtyComponents.add(cid);
     
     // Close any open keystroke batch before processing paste
     closeKeystrokeBatch(true);
@@ -610,16 +700,16 @@ function setActiveTypeBtn(type) {
 // Add component
 // ---------------------------------------------------------------------------
 document.getElementById("btn-add-comp").addEventListener("click", () => {
-  addComponentToSurface({ comp_type: currentType, content: "", component_id: null });
+  const lastBlock = document.querySelector("#script-surface .comp-block:last-child");
+  addComponentToSurface({ comp_type: currentType, content: "", component_id: null }, lastBlock);
 });
 
-function addComponentToSurface({ comp_type, content, component_id }, afterBlock = null) {
+async function addComponentToSurface({ comp_type, content, component_id }, afterBlock = null) {
   const surface = document.getElementById("script-surface");
 
   const block = document.createElement("div");
   block.className = "comp-block";
   block.dataset.type = comp_type;
-  if (component_id) block.dataset.componentId = component_id;
 
   const gutter = document.createElement("div");
   gutter.className = "comp-gutter";
@@ -629,7 +719,7 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   input.className = "comp-input";
   input.contentEditable = "true";
   input.spellcheck = true;
-  input.dataset.componentId = component_id || "";
+  
   input.addEventListener("paste", handlePaste);
   input.addEventListener("copy", handleCopy);
 
@@ -638,36 +728,55 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   block.appendChild(gutter);
   block.appendChild(input);
   
-  if (afterBlock && afterBlock.nextSibling) {
-    surface.insertBefore(block, afterBlock.nextSibling);
+  // --- Insert into DOM ---
+  let afterId = afterBlock ? afterBlock.dataset.componentId : null;
+  let insertionIndex = order.length;
+  if (afterId) {
+      const idx = order.indexOf(afterId);
+      if (idx !== -1) {
+          insertionIndex = idx + 1;
+      }
+  }
+  
+  if (insertionIndex < order.length) {
+      const beforeNode = components.get(order[insertionIndex]).block;
+      surface.insertBefore(block, beforeNode);
   } else {
-    surface.appendChild(block);
+      surface.appendChild(block);
   }
 
-  // Track order
+  // --- Create or update record ---
   let newId = component_id;
   if (!newId) {
-    // New unsaved component — assign a temporary id
-    newId = "tmp-" + crypto.randomUUID();
-    block.dataset.componentId = newId;
-    input.dataset.componentId = newId;
-  }
-  
-  if (afterBlock) {
-    const prevId = afterBlock.dataset.componentId;
-    const idx = order.indexOf(prevId);
-    if (idx !== -1) {
-      order.splice(idx + 1, 0, newId);
-    } else {
-      order.push(newId);
+    // New unsaved component. Save it immediately to get a real ID.
+    setStatus("creating component…");
+    const sequence_order = insertionIndex + 1;
+    const res = await fetch(`/takes/${takeId}/components`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        comp_type,
+        content: "",
+        sequence_order
+      }),
+    });
+    if (!res.ok) {
+        setStatus('error creating component');
+        block.remove();
+        return null;
     }
-  } else {
-    order.push(newId);
+    const data = await res.json();
+    newId = data.component_id;
+    setStatus('component created');
   }
+
+  // --- Finalize state ---
+  block.dataset.componentId = newId;
+  input.dataset.componentId = newId;
   
-  // Note: the old `saveComponent` function saved the initial state.
-  // The new model saves on first keystroke, which is fine.
-  components.set(newId, { block, input, type: comp_type, content: content || "", tmpId: component_id ? undefined : newId });
+  order.splice(insertionIndex, 0, newId);
+  
+  components.set(newId, { block, input, type: comp_type, content: content || "" });
 
   // Focus and gutter highlight
   input.addEventListener("focus", () => {
@@ -677,7 +786,6 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   });
   input.addEventListener("blur", () => {
     block.classList.remove("focused");
-    // When focus is lost, force the current batch to close.
     closeKeystrokeBatch(true);
   });
   
@@ -688,44 +796,25 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
       const currentType = block.dataset.type;
       
       if (content === "") {
-        // Fall-through on empty
         const fallThrough = {
-          SCENE_HEADING: "ACTION",
-          ACTION: "SCENE_HEADING",
-          CHARACTER: "ACTION",
-          DIALOGUE: "ACTION",
-          PARENTHETICAL: "ACTION",
-          TRANSITION: "ACTION",
-          NOTE: "ACTION"
+          SCENE_HEADING: "ACTION", ACTION: "SCENE_HEADING", CHARACTER: "ACTION",
+          DIALOGUE: "ACTION", PARENTHETICAL: "ACTION", TRANSITION: "ACTION", NOTE: "ACTION"
         };
         changeComponentType(block, fallThrough[currentType]);
       } else {
-        // Predictive advance
         const predict = {
-          SCENE_HEADING: "ACTION",
-          ACTION: "ACTION",
-          CHARACTER: "DIALOGUE",
-          DIALOGUE: "CHARACTER",
-          PARENTHETICAL: "DIALOGUE",
-          TRANSITION: "SCENE_HEADING",
-          NOTE: "ACTION"
+          SCENE_HEADING: "ACTION", ACTION: "ACTION", CHARACTER: "DIALOGUE",
+          DIALOGUE: "CHARACTER", PARENTHETICAL: "DIALOGUE", TRANSITION: "SCENE_HEADING", NOTE: "ACTION"
         };
         const nextType = predict[currentType] || "ACTION";
-        // Ensure batch is closed before adding new component
         closeKeystrokeBatch(true);
         addComponentToSurface({ comp_type: nextType, content: "", component_id: null }, block);
       }
     } else if (e.key === "Tab") {
       e.preventDefault();
-      // Manual cycle
       const cycle = {
-        ACTION: "CHARACTER",
-        CHARACTER: "PARENTHETICAL",
-        PARENTHETICAL: "DIALOGUE",
-        DIALOGUE: "TRANSITION",
-        TRANSITION: "SCENE_HEADING",
-        SCENE_HEADING: "ACTION",
-        NOTE: "ACTION"
+        ACTION: "CHARACTER", CHARACTER: "PARENTHETICAL", PARENTHETICAL: "DIALOGUE",
+        DIALOGUE: "TRANSITION", TRANSITION: "SCENE_HEADING", SCENE_HEADING: "ACTION", NOTE: "ACTION"
       };
       changeComponentType(block, cycle[block.dataset.type]);
       recordTabPress();
@@ -733,7 +822,6 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
   });
 
   input.addEventListener("input", (e) => {
-    // Implicit patterns
     const text = input.textContent;
     const currentType = block.dataset.type;
     let newType = null;
@@ -756,16 +844,21 @@ function addComponentToSurface({ comp_type, content, component_id }, afterBlock 
 }
 
 function changeComponentType(block, newType) {
+  const cid = block.dataset.componentId;
+  if (!cid || cid.startsWith("tmp-")) return;
+
+  const comp = components.get(cid);
+  comp.type = newType;
+  
   block.dataset.type = newType;
   const gutter = block.querySelector(".comp-gutter");
   gutter.textContent = labelFor(newType);
   
-  const input = block.querySelector(".comp-input");
   currentType = newType;
   setActiveTypeBtn(newType);
-  // A type change is a significant event, so we force the batch to close.
-  // The component's content hasn't changed, but its type has. The backend
-  // PUT /components/:id handles this, but we log the preceding text edits.
+
+  dirtyComponents.add(cid);
+  
   closeKeystrokeBatch(true);
 }
 
@@ -822,11 +915,19 @@ async function loadComponents() {
   const res = await fetch(`/takes/${takeId}/components`);
   if (!res.ok) { setStatus("error loading components"); return; }
   const data = await res.json();
-  data.forEach(c => addComponentToSurface({
-    comp_type: c.comp_type,
-    content: c.content,
-    component_id: c.component_id,
-  }));
+
+  // Re-order based on sequence_order, which should already be the case
+  // but let's be safe.
+  data.sort((a,b) => a.sequence_order - b.sequence_order);
+
+  let lastBlock = null;
+  for (const c of data) {
+    lastBlock = await addComponentToSurface({
+      comp_type: c.comp_type,
+      content: c.content,
+      component_id: c.component_id,
+    }, lastBlock);
+  }
   setStatus(`loaded ${data.length} component(s)`);
 }
 

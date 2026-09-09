@@ -55,15 +55,17 @@ def publish_event(
     project_id: str | None = None,
     scene_id: str | None = None,
     bible_version_id: int = 0,
-) -> None:
+) -> str:
     """
     Publish one event envelope to authorship.events.
 
     Partition key: scene_id if present, else project_id (§7).
+    Returns the event_id of the published event.
     """
     topic = os.environ["CONFLUENT_TOPIC"]
+    event_id = str(uuid.uuid4())
     envelope = {
-        "event_id": str(uuid.uuid4()),
+        "event_id": event_id,
         "event_type": event_type,
         "project_id": project_id,
         "scene_id": scene_id,
@@ -82,3 +84,4 @@ def publish_event(
     )
     # poll(0) serves delivery callbacks without blocking
     producer.poll(0)
+    return event_id
