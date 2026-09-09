@@ -96,6 +96,13 @@ async def invoke(
     """
     assert_no_prose(payload)
 
+    # --- Deliberation ---
+    from src.deliberation import get_active_axes, generate_poles
+    active_axes = get_active_axes(payload)
+    if active_axes:
+        poles = await generate_poles(active_axes, payload=payload, user_id=user_id)
+        payload["deliberation_poles"] = poles
+
     runner, session_svc = _get_runner()
     input_text = json.dumps(payload)
 

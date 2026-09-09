@@ -42,6 +42,18 @@ def _build_message(text: str) -> types.Content:
     return types.Content(role="user", parts=[types.Part(text=text)])
 
 
+_session_service: InMemorySessionService | None = None
+
+
+async def get_session_for_user(user_id: str, app_name: str) -> "Session":
+    """
+    Get a session for a user, creating it if it doesn't exist.
+    """
+    if _session_service is None:
+        raise RuntimeError("Session service not initialized.")
+    return await _session_service.create_session(app_name=app_name, user_id=user_id)
+
+
 async def invoke_agent(
     *,
     runner: Runner,
@@ -66,9 +78,10 @@ async def invoke_agent(
     exception propagates before publish_event is reached, so no misleading
     event is recorded.
     """
-    session = await session_service.create_session(
-        app_name=app_name, user_id=user_id
-    )
+    global _session_service
+    _session_service = session_service
+    
+    session = await get_session_for_user(user_id, app_name)
     message = _build_message(input_text)
 
     final_text: str | None = None
