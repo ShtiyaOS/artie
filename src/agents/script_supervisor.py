@@ -1,13 +1,14 @@
 # src/agents/script_supervisor.py
 
 """
-The Script Supervisor agent, responsible for matrix diagnosis.
+The Script Supervisor agent, responsible for matrix diagnosis and canon checking.
 """
 
 import json
 import logging
 from typing import Any, Dict, List
 
+from src.agents.supervisor_canon import CanonFinding, WorldRule, get_canon_findings
 from src.agents.supervisor_judgment import (
     CellInfo,
     CellVerdict,
@@ -19,8 +20,9 @@ logger = logging.getLogger(__name__)
 
 class ScriptSupervisor:
     """
-    Evaluates a scene against the six cells for its declared position and
-    emits a SCENE_DIAGNOSED event with structured verdicts.
+    Evaluates a scene against the six cells for its declared position,
+    checks for canon violations against world rules, and emits a
+    SCENE_DIAGNOSED event with structured verdicts and findings.
     """
 
     def __init__(self, clickhouse_client: Any, supabase_client: Any, producer: Any):
@@ -45,6 +47,23 @@ class ScriptSupervisor:
         params = {"position_id": position_id}
         results = self.clickhouse_client.execute_query(query, params)
         return [CellInfo(*row) for row in results]
+
+    def _get_world_rules(self, project_id: str) -> List[WorldRule]:
+        """Fetches up to 10 active world rules for a project."""
+        try:
+            rows = (
+                self.supabase_client.table("world_rules")
+                .select("rule_id, rule_type, condition, outcome, is_active")
+                .eq("project_id", project_id)
+                .eq("is_active", True)
+                .limit(10)
+                .execute()
+                .data
+            )
+            return [WorldRule(**row) for row in rows]
+        except Exception as e:
+            logger.error(f"Could not get world rules for project {project_id}: {e}")
+            return []
 
     def _get_input_confidence(self, cell_id_num: int, project_id: str) -> str:
         """
@@ -77,7 +96,7 @@ class ScriptSupervisor:
             return "VALIDATED"
         except Exception as e:
             logger.error(f"Could not get input confidence for cell {cell_id_num}: {e}")
-            return "PROVISIONAL" # Fail safe
+            return "PROVISIONAL"  # Fail safe
 
     def _evaluate_na_condition(self, scene_text: str, condition: str) -> bool:
         """
@@ -105,6 +124,7 @@ class ScriptSupervisor:
         position_id = scene_payload["position_id"]
         scene_text = scene_payload["scene_text"]
 
+        # 1. Matrix Diagnosis
         cells = self._get_cells_for_position(position_id)
         cell_verdicts: List[Dict[str, Any]] = []
 
@@ -119,17 +139,7 @@ class ScriptSupervisor:
             else:
                 compare_scene_text = None
                 if cell.cell_mode == "TRANSFORMATION" and cell.compare_to_position:
-                    # This is a simplification. We need a way to find a scene_id
-                    # for a given position_id. This likely needs another lookup.
-                    # For now, we assume we can get it.
-                    # This logic is also flawed because it doesn't specify *which* scene.
-                    # Let's assume we get the *first* scene for that position.
-                    # This part of the design is underspecified in the prompt.
-                    # I'll add a placeholder here.
                     logger.warning("TRANSFORMATION mode logic is a placeholder.")
-                    # compare_scene_id = self._get_scene_id_for_position(project_id, cell.compare_to_position)
-                    # if compare_scene_id:
-                    #    compare_scene_text = self._get_scene_text(project_id, compare_scene_id)
                     pass
 
                 verdict = get_cell_verdict(scene_text, cell, compare_scene_text)
@@ -145,12 +155,20 @@ class ScriptSupervisor:
                 }
             )
 
+        # 2. Canon Check
+        world_rules = self._get_world_rules(project_id)
+        canon_findings_raw = get_canon_findings(scene_text, world_rules)
+        canon_findings = [finding.__dict__ for finding in canon_findings_raw]
+
+
+        # 3. Emit Event
         event_payload = {
             "project_id": project_id,
             "scene_id": scene_id,
             "bible_version_id": bible_version_id,
             "position_id": position_id,
             "cell_verdicts": cell_verdicts,
+            "canon_findings": canon_findings,
         }
 
         self.producer.produce(
@@ -159,5 +177,6 @@ class ScriptSupervisor:
             value=json.dumps(event_payload),
         )
         logger.info(
-            "Published SCENE_DIAGNOSED event for scene %s", scene_id
+            "Published SCENE_DIAGNOSED event for scene %s with %d verdicts and %d canon findings.",
+            scene_id, len(cell_verdicts), len(canon_findings)
         )
