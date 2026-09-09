@@ -12,7 +12,7 @@ from typing import Any, Coroutine
 from google.adk.agents import LlmAgent
 
 from src.agents.runner import _adk_model, get_session_for_user
-from src.greenlight import get_commitment_state
+from src.greenlight import get_commitment_state, load_bible_slots
 
 logger = logging.getLogger(__name__)
 
@@ -240,3 +240,109 @@ Do not explain or apologize. Return only the JSON object.
     except Exception as e:
         logger.error(f"Error in synthesis: {e}")
         return None
+
+
+# ------------------------------------------------------------------
+# Voice
+# ------------------------------------------------------------------
+
+# These are placeholders for the story libraries, which are not yet implemented.
+# They return an empty string, satisfying the interface.
+def get_story(story_id: str) -> str:
+    """Placeholder for the story library."""
+    return ""
+
+def get_invented_name(name_id: str) -> str:
+    """Placeholder for the invented name registry."""
+    return ""
+
+# This is a direct copy of the table in docs/08_artie_system_prompt.md
+TUMMLER_POET_BLEND = {
+    "Comedy": (90, 10),
+    "Comedy-Drama": (90, 10),
+    "Action": (70, 30),
+    "Adventure": (70, 30),
+    "Mystery": (40, 60),
+    "Thriller": (40, 60),
+    "Crime": (40, 60),
+    "Romance": (30, 70),
+    "Romantic Comedy": (30, 70),
+    "Science Fiction": (30, 70),
+    "Fantasy": (30, 70),
+    "Horror": (30, 70),
+    "Drama": (10, 90),
+    "Historical": (10, 90),
+    "War": (10, 90),
+    "Western": (10, 90),
+}
+
+def get_tummler_poet_blend(genre: str) -> tuple[int, int]:
+    """Get the Tummler/Poet blend for a given genre."""
+    return TUMMLER_POET_BLEND.get(genre, (50, 50)) # Default to 50/50 if genre not found
+
+async def voice(
+    decision: dict[str, Any],
+    *,
+    payload: dict[str, Any],
+    user_id: str,
+    project_id: str,
+) -> str:
+    """
+    Renders a synthesis decision in Artie's voice.
+
+    docs/06_artie_mind.md §7
+    docs/07_artie_persona.md
+    docs/08_artie_system_prompt.md
+    """
+    with open("docs/08_artie_system_prompt.md", "r") as f:
+        system_prompt = f.read()
+
+    commitment_state = get_commitment_state(project_id)
+    bible_slots = load_bible_slots(project_id)
+    genre = bible_slots.get("S09", {}).get("value", "Drama") # Default to Drama
+    tummler, poet = get_tummler_poet_blend(genre)
+
+
+    voice_agent = LlmAgent(
+        name="voice",
+        model=_adk_model("GEMINI_TEXT_MODEL"),
+        instruction=system_prompt,
+    )
+    session = await get_session_for_user(user_id, "voice")
+
+    # The user's first name is not yet available, so we'll use a placeholder.
+    # This will be replaced with the actual name in a future task.
+    user_name = "Writer"
+
+    prompt = f"""
+{VALUES_FRAME}
+
+**CONTEXT:**
+- Project Genre: {genre}
+- Tummler/Poet Blend: {tummler}/{poet}
+- Commitment State: {commitment_state.get('commitment_state')}
+- Address writer as: {'kid' if not commitment_state.get('use_name_not_kid') else user_name}
+
+**SYNTHESIS DECISION TO RENDER:**
+{json.dumps(decision, indent=2)}
+
+**TASK:**
+Render the above decision in character, as Artie Spiegel.
+Your response MUST adhere to the register specified in the decision.
+You have access to two libraries (placeholders for now):
+- `get_story(story_id)` for craft parables and war stories.
+- `get_invented_name(name_id)` for recurring invented names.
+
+Your response must be conversational output for the user, in character.
+Do not repeat the context or decision.
+Do not add any other explanation.
+"""
+
+    try:
+        response = await voice_agent.send(session.session_id, prompt)
+        if response.parts:
+            return response.parts[0].text
+    except Exception as e:
+        logger.error(f"Error in voice generation: {e}")
+        return "I'm at a loss for words, kid."
+    return "I'm at a loss for words, kid."

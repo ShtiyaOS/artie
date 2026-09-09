@@ -126,3 +126,49 @@ def test_get_active_axes_two_axis_cap():
     }
     # A1, A2, and A4 are all active. A1 and A4 have priority.
     assert get_active_axes(payload) == ["A1", "A4"]
+
+
+@patch.dict("os.environ", {"GEMINI_TEXT_MODEL": "models/gemini-3.5-flash"})
+@pytest.mark.asyncio
+async def test_voice():
+    """Tests the voice rendering function."""
+    decision = {"action": "ACKNOWLEDGE_ONLY", "register": "MENTORIAL_ANECDOTAL"}
+    payload = {"some": "payload"}
+    user_id = "test_user"
+    project_id = "test_project"
+    system_prompt_content = "You are Artie."
+
+    mock_response = MagicMock()
+    mock_response.parts = [MagicMock()]
+    mock_response.parts[0].text = "Acknowledged, kid."
+
+    with patch("builtins.open", MagicMock(read_data=system_prompt_content)), \
+         patch("src.deliberation.get_commitment_state") as mock_get_commitment_state, \
+         patch("src.deliberation.load_bible_slots") as mock_load_bible_slots, \
+         patch("src.deliberation.get_session_for_user", new_callable=AsyncMock) as mock_get_session, \
+         patch("src.deliberation.LlmAgent") as mock_llm_agent:
+
+        mock_get_commitment_state.return_value = {
+            "commitment_state": "SKEPTICAL",
+            "use_name_not_kid": False
+        }
+        mock_load_bible_slots.return_value = {"S09": {"value": "Comedy"}}
+        mock_get_session.return_value = MagicMock(session_id="test_session")
+        
+        mock_agent_instance = MagicMock()
+        mock_agent_instance.send = AsyncMock(return_value=mock_response)
+        mock_llm_agent.return_value = mock_agent_instance
+
+        # We need to import 'voice' inside the test function to use the mocks
+        from src.deliberation import voice
+        result = await voice(decision, payload=payload, user_id=user_id, project_id=project_id)
+
+        assert result == "Acknowledged, kid."
+        mock_llm_agent.assert_called_once()
+        
+        # Check that the prompt contains the key elements
+        sent_prompt = mock_agent_instance.send.call_args[0][1]
+        assert "Project Genre: Comedy" in sent_prompt
+        assert "Tummler/Poet Blend: 90/10" in sent_prompt
+        assert "Commitment State: SKEPTICAL" in sent_prompt
+        assert '"register": "MENTORIAL_ANECDOTAL"' in sent_prompt
