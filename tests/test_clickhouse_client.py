@@ -5,7 +5,7 @@ from src.clickhouse_client import get_coverage_heatmap
 
 
 class TestClickHouseClient(unittest.TestCase):
-    @patch("src.clickhouse_client.clickhouse_connect.get_client")
+    @patch("src.clickhouse_client.get_client")
     def test_get_coverage_heatmap(self, mock_get_client):
         # Arrange
         mock_client = MagicMock()
