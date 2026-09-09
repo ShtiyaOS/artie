@@ -25,6 +25,7 @@ import re
 from typing import Any, Coroutine, Tuple
 
 from google import genai
+from google.genai import types
 from google.adk.agents import LlmAgent
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
@@ -113,6 +114,47 @@ async def generate_frame(
     )
 
     return image_bytes, finish_reason
+
+
+# --------------------------------------------------------------------------
+# Assumption Note Generation
+# --------------------------------------------------------------------------
+
+async def _generate_assumption_note_model_part(prompt: str, image_bytes: bytes) -> str:
+    """
+    Calls a vision model with the generated image and the original prompt
+    to ask what the model assumed.
+    """
+    try:
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        model_name = os.environ["GEMINI_FAST_MODEL"]
+        
+        # Per docs/13_director_assets.md §6
+        model_prompt = [
+            "For each category below, state what the image shows and whether the prompt specified it. If the image does not show a category, answer NOT_PRESENT.",
+            "prompt: " + prompt,
+            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            "people present:",
+            "objects held or worn:",
+            "light source:",
+            "time of day:",
+            "weather:"
+        ]
+
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=model_name,
+            contents=model_prompt,
+        )
+
+        if response.candidates and response.candidates[0].content.parts:
+            return response.candidates[0].content.parts[0].text
+        else:
+            return "Model did not return a valid assumption note."
+            
+    except Exception as e:
+        logger.error(f"Assumption note model call failed: {e}", exc_info=True)
+        return f"Error generating model-based assumption note: {e}"
 
 
 # --------------------------------------------------------------------------
@@ -265,12 +307,19 @@ async def invoke(
             scene_id=scene_id,
             asset_id=asset_id,
         )
+
+        # Generate the model-based part of the assumption note
+        model_assumption_note = await _generate_assumption_note_model_part(
+            prompt=prompt, image_bytes=image_bytes
+        )
+        full_assumption_note = f"{assumption_note}\n\nModel-generated assumptions:\n{model_assumption_note}"
+
         asset_record = supabase_client.create_asset_record(
             scene_id=scene_id,
             gcs_uri=gcs_uri,
             model=os.environ["GEMINI_IMAGE_MODEL"],
             prompt=prompt,
-            assumption_note=assumption_note,
+            assumption_note=full_assumption_note,
             finish_reason=finish_reason,
         )
         return asset_record

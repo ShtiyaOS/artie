@@ -10,6 +10,8 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock, ANY, PropertyMock, AsyncMock
 
+from google.genai import types
+
 from src.agents import director
 
 class TestDirectorHelpers(unittest.TestCase):
@@ -58,9 +60,11 @@ async def test_construct_prompt_pipeline(mock_call_llm):
 @patch('src.agents.director.generate_frame')
 @patch('src.agents.director.gcs_client.upload_asset')
 @patch('src.agents.director.supabase_client.create_asset_record')
+@patch('src.agents.director._generate_assumption_note_model_part')
 @patch('src.agents.director._get_session_service')
 async def test_invoke_end_to_end_success(
     mock_get_session_service,
+    mock_generate_assumption_note,
     mock_create_asset_record,
     mock_upload_asset,
     mock_generate_frame,
@@ -73,6 +77,7 @@ async def test_invoke_end_to_end_success(
     payload = {"action_lines": ["Action!"], "scene_heading": "INT. PLACE - DAY"}
     constructed_data = {"prompt": "A prompt", "assumption_note": "A note"}
     mock_construct_prompt.return_value = constructed_data
+    mock_generate_assumption_note.return_value = "Model-generated note."
 
     mock_generate_frame.return_value = (b'imagedata', "STOP")
     mock_upload_asset.return_value = "gs://test-bucket/some/path.jpg"
@@ -100,7 +105,7 @@ async def test_invoke_end_to_end_success(
         gcs_uri="gs://test-bucket/some/path.jpg",
         model="models/gemini-3-pro-image",
         prompt="A prompt",
-        assumption_note="A note",
+        assumption_note="A note\n\nModel-generated assumptions:\nModel-generated note.",
         finish_reason="STOP",
     )
     assert result == expected_asset_record
@@ -162,9 +167,11 @@ class MockInlineData:
         self.mime_type = mime_type
 
 class MockPart:
-    def __init__(self, with_inline_data=True):
+    def __init__(self, with_inline_data=True, text=None):
         if with_inline_data:
             self.inline_data = MockInlineData()
+        if text:
+            self.text = text
 
 class MockContent:
     def __init__(self, parts=None):
@@ -326,7 +333,78 @@ async def test_generate_frame_api_exception(mock_genai_client):
     # Assert
     assert image_bytes is None
     assert finish_reason == "GENERATION_ERROR"
+
+
+@pytest.mark.asyncio
+@patch.dict(os.environ, {"GEMINI_API_KEY": "test_key", "GEMINI_FAST_MODEL": "gemini-fast-model"})
+@patch('src.agents.director.genai.Client')
+async def test_generate_assumption_note_model_part_success(mock_genai_client):
+    """
+    Tests the happy path for assumption note model part generation.
+    """
+    # Assemble
+    mock_client_instance = mock_genai_client.return_value
+    mock_response_content = "people present: a man (not specified in prompt)"
+    mock_client_instance.models.generate_content.return_value = MockGenAIResponse(
+        candidates=[MockCandidate(content=MockContent(parts=[MockPart(with_inline_data=False, text=mock_response_content)]))]
+    )
+
+    # Act
+    note = await director._generate_assumption_note_model_part(
+        prompt="A test prompt",
+        image_bytes=b"testimagedata"
+    )
+
+    # Assert
+    mock_genai_client.assert_called_with(api_key='test_key')
+    mock_client_instance.models.generate_content.assert_called_once()
+    call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+    assert call_kwargs['model'] == 'gemini-fast-model'
+    assert "people present:" in call_kwargs['contents']
+    assert any(isinstance(p, types.Part) and p.inline_data.data == b'testimagedata' for p in call_kwargs['contents'])
+    assert note == mock_response_content
+
+@patch.dict("os.environ", {"GEMINI_TEXT_MODEL": "models/gemini-3.5-flash", "GEMINI_IMAGE_MODEL": "models/gemini-3-pro-image"})
+@pytest.mark.asyncio
+@patch('src.agents.director._construct_prompt')
+@patch('src.agents.director.generate_frame')
+@patch('src.agents.director._generate_assumption_note_model_part')
+@patch('src.agents.director.gcs_client.upload_asset')
+@patch('src.agents.director.supabase_client.create_asset_record')
+@patch('src.agents.director._get_session_service')
+async def test_invoke_with_assumption_note(
+    mock_get_session_service,
+    mock_create_asset_record,
+    mock_upload_asset,
+    mock_generate_assumption_note,
+    mock_generate_frame,
+    mock_construct_prompt,
+):
+    """
+    Tests that the invoke pipeline generates and saves the full assumption note.
+    """
+    # Assemble
+    payload = {"action_lines": ["Action!"], "scene_heading": "INT. PLACE - DAY"}
+    mock_construct_prompt.return_value = {"prompt": "A prompt", "assumption_note": "Deterministic note."}
+    mock_generate_frame.return_value = (b'imagedata', "STOP")
+    mock_generate_assumption_note.return_value = "Model-generated note."
+    mock_upload_asset.return_value = "gs://test-bucket/some/path.jpg"
+    mock_create_asset_record.return_value = {"asset_id": "new-uuid"}
     
-    mock_session.emit_event.assert_awaited_once()
-    _, event_kwargs = mock_session.emit_event.call_args
-    assert event_kwargs['extra_data']['finish_reason'] == "GENERATION_ERROR"
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+    mock_get_session_service.return_value = mock_session_service
+
+    # Act
+    await director.invoke(
+        payload=payload, user_id="test", project_id="p1", scene_id="s1"
+    )
+
+    # Assert
+    mock_generate_assumption_note.assert_awaited_once_with(prompt="A prompt", image_bytes=b'imagedata')
+    mock_create_asset_record.assert_called_once()
+    _, kwargs = mock_create_asset_record.call_args
+    expected_note = "Deterministic note.\n\nModel-generated assumptions:\nModel-generated note."
+    assert kwargs['assumption_note'] == expected_note

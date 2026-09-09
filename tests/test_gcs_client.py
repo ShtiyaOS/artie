@@ -35,6 +35,7 @@ class TestGcsClient(unittest.TestCase):
         mock_blob.upload_from_string.assert_called_once_with(image_bytes, content_type="image/jpeg")
         self.assertEqual(gcs_uri, f"gs://test-bucket/{expected_path}")
 
+    @patch.dict("os.environ", {}, clear=True)
     def test_upload_asset_no_bucket(self):
         """Tests that a ValueError is raised if the GCS_BUCKET_NAME is not set."""
         with self.assertRaises(ValueError):
