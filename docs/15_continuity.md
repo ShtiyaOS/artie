@@ -240,7 +240,6 @@ most damage.
 | **Tier 2 — Intra-scene** | September 9 if time permits | Bounded context, moderate confidence |
 | **Tier 3 — Cross-scene** | October | The hard version. Needs validation against real scripts before it is trusted. |
 
-**Not in the demo beat sheet**, so per 16_demo_beat_sheet.md §10 it does not get polished for
 camera. But Tier 1 is cheap enough to be running in the hosted prototype — a judge
 who opens the URL and gets a real continuity note has learned something the video
 did not tell them.

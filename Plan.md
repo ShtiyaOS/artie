@@ -52,7 +52,6 @@ as permitted non-AI services.
 | `docs/13_director_assets.md` | Prompt pipeline, assumption note, portraits, GCS |
 | `docs/14_editor.md` | Mode cycling, takes, scene builder, beacon |
 | `docs/15_continuity.md` | Three tiers, grounding constraint, staleness |
-| `docs/16_demo_beat_sheet.md` | **What gets built. Governs every cut decision.** |
 
 ---
 
