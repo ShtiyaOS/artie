@@ -84,6 +84,72 @@ def get_ranked_gaps(project_id: str, bible_version_id: int):
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
 
+def get_coverage_heatmap(project_id: str, bible_version_id: int):
+    """
+    Execute the coverage heatmap query against ClickHouse.
+    Governed by docs/10_clickhouse.md §5.2.
+    """
+    client = get_client()
+    query = """
+        WITH latest AS (
+            SELECT
+                scene_id,
+                cell_id_num,
+                any(position_id)                              AS position_id,
+                argMax(verdict,          diagnosed_at_micros) AS verdict,
+                argMax(input_confidence, diagnosed_at_micros) AS input_confidence,
+                argMax(bible_version_id, diagnosed_at_micros) AS bible_version_id
+            FROM scene_diagnoses
+            WHERE project_id = %(project_id)s
+            GROUP BY scene_id, cell_id_num
+        ),
+        fresh AS (
+            SELECT * FROM latest WHERE bible_version_id = %(bible_version_id)s
+        ),
+        per_cell AS (
+            SELECT
+                cell_id_num,
+                countIf(verdict = 'SATISFIED')          AS n_satisfied,
+                countIf(verdict = 'GAP')                AS n_gap,
+                countIf(verdict = 'NA')                 AS n_na,
+                count()                                 AS n_total,
+                max(toUInt8(input_confidence))          AS worst_input
+            FROM fresh
+            GROUP BY cell_id_num
+        )
+        SELECT
+            c.cell_id                                              AS cell_id,
+            dictGet('dict_positions', 'code', toUInt64(c.position_id)) AS position,
+            dictGet('dict_lenses',    'code', toUInt64(c.lens_id))     AS lens,
+            multiIf(
+                pc.n_total     = 0,          'NO_DATA',
+                pc.n_satisfied > 0,          'SATISFIED',
+                pc.n_na        = pc.n_total, 'NA',
+                                             'GAP'
+            )                                                      AS coverage_state,
+            toString(c.confidence)                                 AS cell_confidence,
+            multiIf(pc.worst_input = 2, 'PROVISIONAL', pc.n_total = 0, 'NONE', 'VALIDATED')
+                                                                   AS input_confidence,
+            multiIf(
+                pc.worst_input != 2,        toString(c.confidence),
+                c.confidence = 'ATTESTED',  'ANCHORED',
+                c.confidence = 'ANCHORED',  'EXTRAPOLATED',
+                                            'EXTRAPOLATED'
+            )                                                      AS display_confidence
+        FROM cells_src AS c
+        LEFT JOIN per_cell AS pc USING (cell_id_num)
+        ORDER BY c.position_id, c.lens_id
+    """
+    result = client.query(
+        query,
+        parameters={
+            "project_id": project_id,
+            "bible_version_id": bible_version_id,
+        },
+    )
+    return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
 def get_cell_definitions(cell_id_nums: list[int]):
     """
     Retrieve cell definitions from ClickHouse by their numeric IDs.
