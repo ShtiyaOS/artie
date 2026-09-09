@@ -411,6 +411,83 @@ body {
   color: #aaa;
   white-space: pre-wrap;
 }
+
+.artie-response {
+  background: #252525;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #aaa;
+  white-space: pre-wrap;
+}
+
+#deliberation-container {
+    margin-top: 12px;
+    border: 1px solid #333;
+    border-radius: 4px;
+    background: #252525;
+    font-size: 11px;
+}
+
+#deliberation-header {
+    padding: 6px 10px;
+    background: #2c2c2c;
+    cursor: pointer;
+    user-select: none;
+    color: #777;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+}
+
+#deliberation-header:hover {
+    background: #333;
+}
+
+#deliberation-trace {
+    padding: 10px;
+    white-space: pre;
+    line-height: 1.6;
+    color: #999;
+    display: none; /* Collapsed by default */
+}
+
+.trace-axis {
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #333;
+}
+.trace-axis:last-child { border-bottom: none; margin-bottom: 0; }
+
+.trace-pole {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.trace-pole-name {
+    color: #bbb;
+    width: 100px;
+}
+
+.trace-pole-strength {
+    color: #8de88d;
+    font-weight: bold;
+}
+
+.trace-synthesis {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px dashed #444;
+    color: #ccc;
+}
+
+.trace-synthesis-action {
+    font-weight: bold;
+    color: #8de88d;
+}
 </style>
 </head>
 <body>
@@ -464,7 +541,7 @@ body {
   <!-- Centre: Artie stub -->
   <div id="centre-pane">
     <div class="pane-title">Artie</div>
-    <span style="color:#333">(Task 29+)</span>
+    <span id="centre-pane-placeholder" style="color:#333">(Task 29+)</span>
   </div>
 
   <!-- Right: the workbench -->
@@ -487,6 +564,7 @@ body {
       <button id="btn-add-comp">+ Add Component</button>
       <button id="btn-export">Export Fountain</button>
       <button id="btn-submit">Submit Scene</button>
+       <button id="test-deliberation-btn">Test Deliberation UI</button>
     </div>
   </div>
 </div>
@@ -531,6 +609,131 @@ const chainHashes = new Map(); // component_id -> hash
 // Inactivity and Return Beacon state
 let inactivityTimer = null;
 let isAbsent = false;
+
+// ---------------------------------------------------------------------------
+// Deliberation Trace
+// ---------------------------------------------------------------------------
+
+// NOTE: This function is the placeholder for the missing communication link.
+// It is assumed that the response from artie.invoke() is received somehow
+// and passed to this function.
+document.getElementById("test-deliberation-btn").addEventListener("click", () => {
+    const mockResponse = {
+        "response_text": "I see a gap in the structure here. The protagonist's goal isn't active enough. Let's press on that.",
+        "deliberation_trace": {
+            "axes": ["A1"],
+            "poles": [
+                {
+                    "axis": "A1",
+                    "poles": [
+                        { "pole": "EXPANSION", "position": "hold it back", "reason": "momentum matters more", "strength": 2 },
+                        { "pole": "RESTRICTION", "position": "raise it now", "reason": "weight-5 gap", "strength": 4 }
+                    ]
+                }
+            ],
+            "synthesis": {
+                "action": "RAISE_FINDING",
+                "target": "X06.Y2",
+                "hold": ["X03.Y1"],
+                "register": "DIRECT",
+                "rationale": "Restriction pole is stronger and the finding is critical."
+            }
+        }
+    };
+    handleArtieResponse(mockResponse);
+});
+
+function handleArtieResponse(response) {
+    if (!response) return;
+
+    const centrePane = document.getElementById("centre-pane");
+    
+    // Clear placeholder
+    const placeholder = document.getElementById("centre-pane-placeholder");
+    if (placeholder) placeholder.remove();
+
+    // Display Artie's response
+    if (response.response_text) {
+        const responseEl = document.createElement("div");
+        responseEl.className = "artie-response";
+        responseEl.textContent = response.response_text;
+        centrePane.appendChild(responseEl);
+    }
+
+    // Display deliberation trace
+    if (response.deliberation_trace) {
+        renderDeliberationTrace(response.deliberation_trace);
+    }
+}
+
+function renderDeliberationTrace(trace) {
+    const centrePane = document.getElementById("centre-pane");
+
+    const container = document.createElement("div");
+    container.id = "deliberation-container";
+
+    const header = document.createElement("div");
+    header.id = "deliberation-header";
+    header.textContent = "▸ Deliberation Trace";
+    
+    const traceEl = document.createElement("div");
+    traceEl.id = "deliberation-trace";
+
+    // Render Axes and Poles
+    trace.poles.forEach(axisData => {
+        const axisEl = document.createElement("div");
+        axisEl.className = "trace-axis";
+        const axisName = document.createElement("strong");
+        axisName.textContent = `${axisData.axis}`;
+        axisEl.appendChild(axisName);
+
+        axisData.poles.forEach(pole => {
+            const poleEl = document.createElement("div");
+            poleEl.className = "trace-pole";
+            
+            const name = document.createElement("span");
+            name.className = "trace-pole-name";
+            name.textContent = pole.pole;
+
+            const position = document.createElement("span");
+            position.textContent = `(${pole.position})`;
+
+            const strength = document.createElement("span");
+            strength.className = "trace-pole-strength";
+            strength.textContent = `[${pole.strength}]`;
+
+            poleEl.append(name, position, strength);
+            axisEl.appendChild(poleEl);
+        });
+        traceEl.appendChild(axisEl);
+    });
+
+    // Render Synthesis
+    const synthesis = trace.synthesis;
+    if (synthesis) {
+        const synthesisEl = document.createElement("div");
+        synthesisEl.className = "trace-synthesis";
+        synthesisEl.innerHTML = `
+            <strong>Synthesis:</strong> <span class="trace-synthesis-action">${synthesis.action}</span><br>
+            <strong>Target:</strong> ${synthesis.target || 'none'}<br>
+            <strong>Hold:</strong> ${synthesis.hold && synthesis.hold.length > 0 ? synthesis.hold.join(', ') : 'none'}<br>
+            <strong>Register:</strong> ${synthesis.register}<br>
+            <strong>Rationale:</strong> <em>${synthesis.rationale}</em>
+        `;
+        traceEl.appendChild(synthesisEl);
+    }
+
+    container.appendChild(header);
+    container.appendChild(traceEl);
+    centrePane.appendChild(container);
+
+    // Toggle visibility
+    header.addEventListener("click", () => {
+        const isHidden = traceEl.style.display === "none";
+        traceEl.style.display = isHidden ? "block" : "none";
+        header.textContent = isHidden ? "▾ Deliberation Trace" : "▸ Deliberation Trace";
+    });
+}
 
 
 // ---------------------------------------------------------------------------

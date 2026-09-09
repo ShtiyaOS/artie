@@ -87,7 +87,7 @@ async def invoke(
     project_id: str | None = None,
     scene_id: str | None = None,
     bible_version_id: int = 0,
-) -> str | None:
+) -> dict[str, Any] | None:
     """
     Invoke Artie with a Backend → Artie payload (docs/05_orchestration.md §5.3).
 
@@ -97,28 +97,55 @@ async def invoke(
     assert_no_prose(payload)
 
     # --- Deliberation ---
-    from src.deliberation import get_active_axes, generate_poles
+    from src.deliberation import get_active_axes, generate_poles, synthesize, voice
+    from src.confluent_producer import publish_event
+
     active_axes = get_active_axes(payload)
+    deliberation_trace = None
+    response_text = None
+
     if active_axes:
         poles = await generate_poles(active_axes, payload=payload, user_id=user_id)
-        payload["deliberation_poles"] = poles
+        if poles and project_id:
+            decision = await synthesize(poles, payload=payload, user_id=user_id, project_id=project_id)
+            if decision:
+                deliberation_trace = {
+                    "axes": active_axes,
+                    "poles": poles,
+                    "synthesis": decision,
+                }
+                publish_event(
+                    event_type="AI_DELIBERATION",
+                    actor="artie",
+                    payload=deliberation_trace,
+                    project_id=project_id,
+                    scene_id=scene_id,
+                    bible_version_id=bible_version_id,
+                )
+                response_text = await voice(decision, payload=payload, user_id=user_id, project_id=project_id)
 
-    runner, session_svc = _get_runner()
-    input_text = json.dumps(payload)
-
-    return await invoke_agent(
-        runner=runner,
-        session_service=session_svc,
-        app_name=APP_NAME,
-        user_id=user_id,
-        input_text=input_text,
-        event_type="AGENT_QUESTION",
-        actor="artie",
-        project_id=project_id,
-        scene_id=scene_id,
-        bible_version_id=bible_version_id,
-        extra_provenance={
-            "gate": payload.get("gate"),
-            "pending_findings_count": len(payload.get("pending_findings", [])),
-        },
-    )
+    if response_text is None:
+        # Fallback to non-deliberative response if deliberation doesn't happen or fails
+        runner, session_svc = _get_runner()
+        input_text = json.dumps(payload)
+        response_text = await invoke_agent(
+            runner=runner,
+            session_service=session_svc,
+            app_name=APP_NAME,
+            user_id=user_id,
+            input_text=input_text,
+            event_type="AGENT_QUESTION",
+            actor="artie",
+            project_id=project_id,
+            scene_id=scene_id,
+            bible_version_id=bible_version_id,
+            extra_provenance={
+                "gate": payload.get("gate"),
+                "pending_findings_count": len(payload.get("pending_findings", [])),
+            },
+        )
+    
+    return {
+        "response_text": response_text,
+        "deliberation_trace": deliberation_trace,
+    }

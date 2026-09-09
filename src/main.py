@@ -367,7 +367,10 @@ async def invoke_artie(request: Request):
     except FirewallBreach as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
-    return JSONResponse({"response": response}, status_code=200)
+    if response is None:
+        return JSONResponse({"error": "agent invocation failed"}, status_code=500)
+
+    return JSONResponse(response, status_code=200)
 
 
 @app.post("/invoke/supervisor")
