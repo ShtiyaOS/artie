@@ -91,7 +91,7 @@ class TestCreateTake:
         assert body["take_number"] == 1
 
     def test_creates_second_take(self, client):
-        existing_row = {"take_number": 1}
+        existing_row = {"take_id": "take-uuid-1", "take_number": 1}
         take_row = {
             "take_id": "take-uuid-2",
             "take_number": 2,
@@ -99,19 +99,98 @@ class TestCreateTake:
             "is_final_cut": False,
         }
         db, chain = _mock_db([take_row])
+
+        # side_effect list:
+        # 1. most_recent_take_query
+        # 2. new_take_result (insert)
+        # 3. components_to_copy_result (empty for this simple test)
         chain.execute.side_effect = [
-            MagicMock(data=[existing_row]),  # existing takes → max take_number=1
-            MagicMock(data=[take_row]),      # insert result
+            MagicMock(data=[existing_row]),
+            MagicMock(data=[take_row]),
+            MagicMock(data=[]),
         ]
         with patch("src.api.editor.get_supabase", return_value=db):
             res = client.post("/scene/scene-uuid/takes")
         assert res.status_code == 201
         assert res.json()["take_number"] == 2
 
+    def test_creates_second_take_and_copies_components(self, client):
+        # Arrange
+        previous_take = {"take_id": "take-uuid-1", "take_number": 1}
+        new_take = {"take_id": "take-uuid-2", "take_number": 2}
+        components = [
+            {"sequence_order": 1, "comp_type": "ACTION", "content": "Hello", "content_hash": "h1"},
+            {"sequence_order": 2, "comp_type": "DIALOGUE", "content": "World", "content_hash": "h2"},
+        ]
+        
+        db, chain = _mock_db([])
+        
+        # side_effect list for create_take:
+        # 1. most_recent_take_query -> previous_take
+        # 2. new_take_result (insert) -> new_take
+        # 3. components_to_copy_result -> components
+        # 4. component insert result (we don't check it, but it's called)
+        chain.execute.side_effect = [
+            MagicMock(data=[previous_take]),
+            MagicMock(data=[new_take]),
+            MagicMock(data=components),
+            MagicMock(data=[]),
+        ]
+
+        # Act
+        with patch("src.api.editor.get_supabase", return_value=db):
+            res = client.post("/scene/scene-uuid/takes")
+
+        # Assert
+        assert res.status_code == 201
+        assert res.json()["take_id"] == "take-uuid-2"
+
+        # Check that the component insert was called with the correct data
+        insert_call = chain.insert.call_args
+        assert insert_call is not None
+        
+        inserted_data = insert_call.args[0]
+        assert len(inserted_data) == 2
+        
+        # Verify that the new take_id was used for the copied components
+        assert inserted_data[0]["take_id"] == "take-uuid-2"
+        assert inserted_data[0]["content"] == "Hello"
+        assert inserted_data[1]["take_id"] == "take-uuid-2"
+        assert inserted_data[1]["content"] == "World"
+
+
+# ---------------------------------------------------------------------------
+# POST /takes/{take_id}/finalize
+# ---------------------------------------------------------------------------
+
+class TestFinalizeTake:
+    def test_finalizes_a_take(self, client):
+        db, _ = _mock_db([])
+        db.rpc = MagicMock()
+        db.rpc.return_value.execute.return_value = None
+
+        with patch("src.api.editor.get_supabase", return_value=db):
+            res = client.post("/takes/take-uuid-1/finalize")
+
+        assert res.status_code == 200
+        assert res.json() == {"status": "final cut set"}
+        db.rpc.assert_called_once_with("set_final_cut", {"target_take_id": "take-uuid-1"})
+
+    def test_finalize_not_found(self, client):
+        db, _ = _mock_db([])
+        db.rpc = MagicMock()
+        db.rpc.return_value.execute.side_effect = Exception("Take not found")
+
+        with patch("src.api.editor.get_supabase", return_value=db):
+            res = client.post("/takes/take-uuid-dne/finalize")
+
+        assert res.status_code == 404
+        assert res.json() == {"error": "take not found"}
 
 # ---------------------------------------------------------------------------
 # GET /scene/{scene_id}/takes — list takes
 # ---------------------------------------------------------------------------
+
 
 class TestListTakes:
     def test_returns_takes(self, client):

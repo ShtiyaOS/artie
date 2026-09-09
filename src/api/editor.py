@@ -37,6 +37,9 @@ async def create_take(scene_id: str) -> JSONResponse:
     """
     Create a new take for a scene.
 
+    If this is not the first take, it copies all script_components from the
+    most recent take to this new one.
+
     Determines the next take_number by counting existing takes.
     The new take is not submitted (submitted_at = NULL, is_final_cut = False).
 
@@ -44,18 +47,21 @@ async def create_take(scene_id: str) -> JSONResponse:
     """
     db = get_supabase()
 
-    # Count existing takes to determine the next take_number.
-    existing = (
+    # Get the most recent take to determine the next number and copy from.
+    most_recent_take_query = (
         db.table("takes")
-        .select("take_number")
+        .select("take_id, take_number")
         .eq("scene_id", scene_id)
         .order("take_number", desc=True)
         .limit(1)
         .execute()
     )
-    next_number = (existing.data[0]["take_number"] + 1) if existing.data else 1
+    
+    previous_take = most_recent_take_query.data[0] if most_recent_take_query.data else None
+    next_number = (previous_take["take_number"] + 1) if previous_take else 1
 
-    result = (
+    # Create the new take.
+    new_take_result = (
         db.table("takes")
         .insert({
             "scene_id": scene_id,
@@ -64,11 +70,54 @@ async def create_take(scene_id: str) -> JSONResponse:
         })
         .execute()
     )
-    row = result.data[0]
+    new_take = new_take_result.data[0]
+
+    # If this is a subsequent take, copy components from the previous one.
+    if previous_take:
+        components_to_copy_result = (
+            db.table("script_components")
+            .select("sequence_order, comp_type, content, content_hash")
+            .eq("take_id", previous_take["take_id"])
+            .execute()
+        )
+        
+        if components_to_copy_result.data:
+            new_components = [
+                {
+                    **component,
+                    "take_id": new_take["take_id"],
+                }
+                for component in components_to_copy_result.data
+            ]
+            db.table("script_components").insert(new_components).execute()
+
     return JSONResponse(
-        {"take_id": row["take_id"], "take_number": row["take_number"]},
+        {"take_id": new_take["take_id"], "take_number": new_take["take_number"]},
         status_code=201,
     )
+
+
+@router.post("/takes/{take_id}/finalize")
+async def finalize_take(take_id: str) -> JSONResponse:
+    """
+    Designate a take as the "final cut" for its scene.
+
+    This procedure is atomic and handled by a Postgres function, which ensures
+    that only one take per scene can be the final cut. See
+    `sql/15_rpc_set_final_cut.sql`.
+
+    Returns 200 on success, 404 if the take does not exist.
+    """
+    db = get_supabase()
+    try:
+        db.rpc("set_final_cut", {"target_take_id": take_id}).execute()
+        return JSONResponse({"status": "final cut set"}, status_code=200)
+    except Exception as e:
+        # A more robust solution would inspect the specific PG error.
+        if "not found" in str(e).lower():
+            return JSONResponse({"error": "take not found"}, status_code=404)
+        # Re-raise other exceptions.
+        raise e
 
 
 @router.get("/scene/{scene_id}/takes")
