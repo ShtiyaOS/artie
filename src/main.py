@@ -176,6 +176,41 @@ async def get_project(project_id: str):
     return JSONResponse(result.data[0])
 
 
+def _current_bible_version(project_id: str) -> int:
+    """Fetch current_bible_version from Supabase, default 1."""
+    try:
+        r = (
+            get_supabase()
+            .table("projects")
+            .select("current_bible_version")
+            .eq("project_id", project_id)
+            .single()
+            .execute()
+        )
+        return r.data.get("current_bible_version", 1) if r.data else 1
+    except Exception:
+        return 1
+
+@app.get("/project/{project_id}/gaps")
+async def get_ranked_gaps(project_id: str, bible_version_id: int | None = None):
+    """
+    Retrieve the ranked gaps list for a project.
+
+    Governed by docs/10_clickhouse.md §5.3.
+    """
+    from src.clickhouse_client import get_ranked_gaps as get_gaps_from_ch
+    
+    version = bible_version_id if bible_version_id is not None else _current_bible_version(project_id)
+    
+    # Environment guard for ClickHouse
+    if not os.environ.get("CLICKHOUSE_HOST"):
+        logger.warning("CLICKHOUSE_HOST not set; returning empty gaps list.")
+        return JSONResponse([])
+
+    gaps = get_gaps_from_ch(project_id, version)
+    return JSONResponse(gaps)
+
+
 # ---------------------------------------------------------------------------
 # Agent invocation endpoints — docs/05_orchestration.md §1
 # Each agent is a peer; the backend orchestrates, never Artie.
