@@ -392,6 +392,8 @@
 - **Governs:** `docs/12_manifest.md` §5
 - **Implements:** None
 - **Depends on:** 31
+- **Status:** Completed
+- **Notes:** `scripts/verify_manifest.py` created and verified against a project with known discontinuities. The script correctly identified components with hashes in Supabase but no corresponding chain in ClickHouse, and correctly skipped components with null hashes. This fulfills the acceptance criteria.
 - **Acceptance criteria:** The verifier can recompute the hash chain for a component from `keystroke_batches` and confirm it matches the `content_hash` in `script_components`.
 
 ### Task 52
