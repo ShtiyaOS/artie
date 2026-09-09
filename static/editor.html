@@ -343,6 +343,18 @@ body {
   text-align: center;
   line-height: 1.5;
 }
+
+.beacon-note {
+  background: #252525;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #aaa;
+  white-space: pre-wrap;
+}
 </style>
 </head>
 <body>
@@ -413,6 +425,13 @@ body {
 "use strict";
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const SAVE_IDLE_MS = 2000;
+const SAVE_CHAR_THRESHOLD = 200;
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let sceneId = null;
@@ -437,6 +456,68 @@ const keystrokeBatch = {
 };
 let lastKnownCopy = "";
 const chainHashes = new Map(); // component_id -> hash
+
+// Inactivity and Return Beacon state
+let inactivityTimer = null;
+let isAbsent = false;
+
+
+// ---------------------------------------------------------------------------
+// Return Beacon
+// ---------------------------------------------------------------------------
+function displayBeacon(noteText) {
+  const centrePane = document.getElementById("centre-pane");
+  const beaconNote = document.createElement("div");
+  beaconNote.className = "beacon-note";
+  beaconNote.textContent = noteText;
+  
+  // Clear placeholder and add note
+  const placeholder = centrePane.querySelector("span");
+  if (placeholder) placeholder.remove();
+  centrePane.appendChild(beaconNote);
+}
+
+async function triggerReturnBeacon() {
+  if (!sceneId || !takeId) return;
+  
+  setStatus("welcome back…");
+  try {
+    const res = await fetch("/beacon/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scene_id: sceneId,
+        take_id: takeId,
+        active_component_type: currentType,
+      }),
+    });
+
+    if (res.ok) {
+      const beacon = await res.json();
+      displayBeacon(beacon.note);
+      setStatus("beacon received.");
+    } else {
+       const err = await res.json();
+       setStatus(`beacon error: ${err.error || res.status}`);
+    }
+  } catch (e) {
+    setStatus(`beacon error: ${e.message}`);
+  }
+}
+
+function resetInactivityTimer() {
+  if (isAbsent) {
+    // User has returned
+    isAbsent = false;
+    triggerReturnBeacon();
+  }
+
+  clearTimeout(inactivityTimer);
+  inactivityTimer = setTimeout(() => {
+    isAbsent = true;
+    console.log("User is now considered absent.");
+  }, INACTIVITY_TIMEOUT_MS);
+}
 
 
 // ---------------------------------------------------------------------------
@@ -485,6 +566,7 @@ async function saveDirtyComponents() {
 }
 
 document.getElementById("btn-submit").addEventListener("click", async () => {
+  resetInactivityTimer();
   if (!takeId) return;
 
   // Save any lingering changes first
@@ -591,6 +673,7 @@ async function closeKeystrokeBatch(force = false) {
 }
 
 function handleKeystroke(e) {
+  resetInactivityTimer();
   const input = e.target;
   const cid = input.dataset.componentId;
   if (!cid || cid.startsWith("tmp-")) return;
@@ -625,6 +708,7 @@ function handleCopy(e) {
 }
 
 function handlePaste(e) {
+    resetInactivityTimer();
     e.preventDefault();
     const text = e.clipboardData.getData("text/plain");
     document.execCommand("insertText", false, text);
@@ -678,6 +762,7 @@ document.getElementById("btn-open").addEventListener("click", async () => {
   document.getElementById("scene-label").textContent =
     `scene ${sceneId.slice(0,8)}… / take ${takeId.slice(0,8)}…`;
   document.getElementById("init-screen").style.display = "none";
+  resetInactivityTimer();
 });
 
 // ---------------------------------------------------------------------------
@@ -687,6 +772,7 @@ document.querySelectorAll(".comp-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     currentType = btn.dataset.type;
     setActiveTypeBtn(currentType);
+    resetInactivityTimer();
   });
 });
 
@@ -700,6 +786,7 @@ function setActiveTypeBtn(type) {
 // Add component
 // ---------------------------------------------------------------------------
 document.getElementById("btn-add-comp").addEventListener("click", () => {
+  resetInactivityTimer();
   const lastBlock = document.querySelector("#script-surface .comp-block:last-child");
   addComponentToSurface({ comp_type: currentType, content: "", component_id: null }, lastBlock);
 });
@@ -935,6 +1022,7 @@ async function loadComponents() {
 // Export Fountain
 // ---------------------------------------------------------------------------
 document.getElementById("btn-export").addEventListener("click", async () => {
+  resetInactivityTimer();
   if (!takeId) return;
   const res = await fetch(`/takes/${takeId}/fountain`);
   if (!res.ok) { setStatus("export error"); return; }

@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 
 from src.supabase_client import get_client as get_supabase
 from src.fountain.emit import emit_fountain
@@ -384,6 +385,76 @@ async def delete_component(component_id: str) -> JSONResponse:
     if not result.data:
         return JSONResponse({"error": "component not found"}, status_code=404)
     return JSONResponse({"status": "deleted"}, status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# Return Beacon
+# ---------------------------------------------------------------------------
+
+class BeaconTriggerRequest(BaseModel):
+    scene_id: str
+    take_id: str
+    active_component_type: str
+
+@router.post("/beacon/trigger")
+async def trigger_beacon(request: BeaconTriggerRequest) -> JSONResponse:
+    """
+    Triggered on user return after a period of inactivity.
+
+    Fires AGENT_BEACON_LEFT and returns a note for Artie's pane.
+    (docs/14_editor.md §8)
+    """
+    db = get_supabase()
+
+    # 1. Get scene and project info
+    scene_res = db.table("scenes").select("*").eq("scene_id", request.scene_id).limit(1).execute()
+    if not scene_res.data:
+        return JSONResponse({"error": "scene not found"}, status_code=404)
+    scene = scene_res.data[0]
+    project_id = scene["project_id"]
+
+    # 2. Get declared rig slots
+    rig_slots_res = db.table("scene_rig_slots").select("slot_id, value").eq("scene_id", request.scene_id).eq("is_filled", True).execute()
+    rig_slots = {item['slot_id']: item['value'] for item in rig_slots_res.data}
+
+    # 3. Get undelivered findings
+    findings_res = db.table("agent_queue").select("item_type, payload").eq("project_id", project_id).is_("delivered_at", "null").execute()
+    undelivered_findings = findings_res.data
+
+    # 4. Fire AGENT_BEACON_LEFT event
+    publish_event(
+        event_type="AGENT_BEACON_LEFT",
+        actor="artie",
+        payload={
+            "scene_id": request.scene_id,
+            "take_id": request.take_id,
+            "position_id": scene.get("position_id"),
+            "active_component_type": request.active_component_type,
+            "declared_rig_slots": rig_slots,
+            "undelivered_findings_count": len(undelivered_findings),
+        },
+        project_id=project_id,
+        scene_id=request.scene_id,
+    )
+
+    # 5. Format the note
+    # This is a simplified version of what's in the spec, as we don't have the VOICE model.
+    position_str = f"on scene {scene.get('sequence_order', 'N/A')}"
+    if scene.get("position_id"):
+        position_str += f" (position {scene['position_id']})"
+    
+    comp_type_str = request.active_component_type.lower().replace('_', ' ')
+
+    note = f"Welcome back. You stepped out mid-{comp_type_str} {position_str}."
+
+    if rig_slots:
+        note += f"\nYou'd set up the scene's intent."
+    if undelivered_findings:
+        note += f"\nThere are {len(undelivered_findings)} new finding(s) waiting for you."
+    
+    note += "\nPick it up right here."
+
+    return JSONResponse({"note": note})
 
 
 # ---------------------------------------------------------------------------
