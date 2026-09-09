@@ -30,6 +30,10 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 
 from src.agents.runner import _adk_model, invoke_agent
+import uuid
+from src import gcs_client
+from src import supabase_client
+
 
 logger = logging.getLogger(__name__)
 
@@ -203,71 +207,72 @@ async def _construct_prompt(payload: dict[str, Any]) -> dict[str, str]:
 # Public invocation interface
 # --------------------------------------------------------------------------
 
-_agent: LlmAgent | None = None
 _session_service: InMemorySessionService | None = None
-_runner: Runner | None = None
 
-def _get_runner() -> tuple[Runner, InMemorySessionService]:
-    global _agent, _session_service, _runner
-    if _runner is None:
-        _agent = LlmAgent(
-            name="director",
-            model=_adk_model("GEMINI_TEXT_MODEL"),
-            instruction=(
-                "You are the final step in a prompt construction pipeline. "
-                "You will receive a fully formed image prompt and an assumption note in a JSON object. "
-                "Your task is to return this JSON object verbatim. "
-                "Do not add, remove, or change anything."
-            ),
-        )
+def _get_session_service() -> InMemorySessionService:
+    global _session_service
+    if _session_service is None:
         _session_service = InMemorySessionService()
-        _runner = Runner(
-            agent=_agent,
-            app_name=APP_NAME,
-            session_service=_session_service,
-        )
-    return _runner, _session_service
+    return _session_service
 
 async def invoke(
     *,
     payload: dict[str, Any],
     user_id: str,
-    project_id: str | None = None,
-    scene_id: str | None = None,
+    project_id: str,
+    scene_id: str,
     bible_version_id: int = 0,
-) -> str | None:
+) -> dict[str, Any] | None:
     """
-    Invoke the Director to construct a prompt from a Backend payload
-    (docs/05_orchestration.md §5.4).
-
-    Payload must contain:
-      action_lines: list[str]   — Action elements only, no dialogue
-      scene_heading: str        — The scene heading
-      character_refs: list[dict] — optional, canonical_frame_uri per character
-
-    Returns the Director's JSON response text (prompt + assumption_note).
-    Provenance event FRAME_PROMPT_CONSTRUCTED is emitted by the wrapper.
+    Invoke the Director to generate a frame and store it.
     """
     prompt_data = await _construct_prompt(payload)
-    input_text = json.dumps(prompt_data)
-    
-    runner, session_svc = _get_runner()
+    prompt = prompt_data["prompt"]
+    assumption_note = prompt_data["assumption_note"]
 
-    return await invoke_agent(
-        runner=runner,
-        session_service=session_svc,
-        app_name=APP_NAME,
-        user_id=user_id,
-        input_text=input_text,
-        event_type="FRAME_PROMPT_CONSTRUCTED",
+    session_service = _get_session_service()
+    
+    # Emit FRAME_PROMPT_CONSTRUCTED event
+    session = await session_service.get_session(APP_NAME, user_id)
+    await session.emit_event(
+        "FRAME_PROMPT_CONSTRUCTED",
         actor="director",
         project_id=project_id,
         scene_id=scene_id,
         bible_version_id=bible_version_id,
-        extra_provenance={
+        extra_data={
             "action_line_count": len(payload.get("action_lines", [])),
             "character_ref_count": len(payload.get("character_refs", [])),
-            "constructed_prompt": prompt_data["prompt"],
-            "assumption_note": prompt_data["assumption_note"],
+            "constructed_prompt": prompt,
+            "assumption_note": assumption_note,
         },
     )
+
+    image_bytes, finish_reason = await generate_frame(
+        prompt=prompt,
+        user_id=user_id,
+        session_service=session_service,
+        project_id=project_id,
+        scene_id=scene_id,
+        bible_version_id=bible_version_id,
+    )
+
+    if image_bytes:
+        asset_id = str(uuid.uuid4())
+        gcs_uri = gcs_client.upload_asset(
+            image_bytes=image_bytes,
+            project_id=project_id,
+            scene_id=scene_id,
+            asset_id=asset_id,
+        )
+        asset_record = supabase_client.create_asset_record(
+            scene_id=scene_id,
+            gcs_uri=gcs_uri,
+            model=os.environ["GEMINI_IMAGE_MODEL"],
+            prompt=prompt,
+            assumption_note=assumption_note,
+            finish_reason=finish_reason,
+        )
+        return asset_record
+    else:
+        return {"error": "Image generation failed", "finish_reason": finish_reason}

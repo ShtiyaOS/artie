@@ -419,6 +419,9 @@ async def invoke_director(request: Request):
     scene_id = body.get("scene_id")
     bible_version_id = int(body.get("bible_version_id", 0))
 
+    if not project_id or not scene_id:
+        return JSONResponse({"error": "project_id and scene_id are required"}, status_code=400)
+
     response = await director_invoke(
         payload=payload,
         user_id=user_id,
@@ -426,7 +429,11 @@ async def invoke_director(request: Request):
         scene_id=scene_id,
         bible_version_id=bible_version_id,
     )
-    return JSONResponse({"response": response}, status_code=200)
+    
+    if response and response.get("error"):
+        return JSONResponse(response, status_code=500)
+
+    return JSONResponse(response)
 
 
 # ---------------------------------------------------------------------------

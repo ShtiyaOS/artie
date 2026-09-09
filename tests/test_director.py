@@ -52,47 +52,105 @@ async def test_construct_prompt_pipeline(mock_call_llm):
     assert "Moment selected:" in result["assumption_note"]
     assert mock_call_llm.call_count == 3
 
-@patch.dict("os.environ", {"GEMINI_TEXT_MODEL": "models/gemini-3.5-flash", "GEMINI_IMAGE_MODEL": "models/gemini-3-pro-image", "GEMINI_API_KEY": "test-key"})
+@patch.dict("os.environ", {"GEMINI_TEXT_MODEL": "models/gemini-3.5-flash", "GEMINI_IMAGE_MODEL": "models/gemini-3-pro-image"})
 @pytest.mark.asyncio
 @patch('src.agents.director._construct_prompt')
-@patch('src.agents.director.invoke_agent')
-async def test_invoke_calls_pipeline_and_agent(mock_invoke_agent, mock_construct_prompt):
+@patch('src.agents.director.generate_frame')
+@patch('src.agents.director.gcs_client.upload_asset')
+@patch('src.agents.director.supabase_client.create_asset_record')
+@patch('src.agents.director._get_session_service')
+async def test_invoke_end_to_end_success(
+    mock_get_session_service,
+    mock_create_asset_record,
+    mock_upload_asset,
+    mock_generate_frame,
+    mock_construct_prompt,
+):
     """
-    Tests that the main invoke function calls the construction pipeline
-    and then passes the result to the agent runner.
+    Tests the full invoke pipeline on success.
     """
     # Assemble
     payload = {"action_lines": ["Action!"], "scene_heading": "INT. PLACE - DAY"}
     constructed_data = {"prompt": "A prompt", "assumption_note": "A note"}
     mock_construct_prompt.return_value = constructed_data
-    mock_invoke_agent.return_value = json.dumps(constructed_data)
+
+    mock_generate_frame.return_value = (b'imagedata', "STOP")
+    mock_upload_asset.return_value = "gs://test-bucket/some/path.jpg"
+    
+    expected_asset_record = {"asset_id": "new-uuid", "gcs_uri": "gs://test-bucket/some/path.jpg"}
+    mock_create_asset_record.return_value = expected_asset_record
+
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+    mock_get_session_service.return_value = mock_session_service
 
     # Act
     result = await director.invoke(
-        payload=payload, user_id="test", project_id="test", scene_id="test"
+        payload=payload, user_id="test", project_id="p1", scene_id="s1"
     )
 
     # Assert
     mock_construct_prompt.assert_awaited_once_with(payload)
-    mock_invoke_agent.assert_awaited_once_with(
-        runner=ANY,
-        session_service=ANY,
-        app_name='director',
-        user_id='test',
-        input_text=json.dumps(constructed_data),
-        event_type='FRAME_PROMPT_CONSTRUCTED',
-        actor='director',
-        project_id='test',
-        scene_id='test',
-        bible_version_id=0,
-        extra_provenance={
-            'action_line_count': 1,
-            'character_ref_count': 0,
-            'constructed_prompt': 'A prompt',
-            'assumption_note': 'A note',
-        },
+    mock_generate_frame.assert_awaited_once()
+    mock_upload_asset.assert_called_once()
+    mock_create_asset_record.assert_called_once_with(
+        scene_id='s1',
+        gcs_uri="gs://test-bucket/some/path.jpg",
+        model="models/gemini-3-pro-image",
+        prompt="A prompt",
+        assumption_note="A note",
+        finish_reason="STOP",
     )
-    assert result == json.dumps(constructed_data)
+    assert result == expected_asset_record
+    # Check that FRAME_PROMPT_CONSTRUCTED event was emitted
+    assert mock_session.emit_event.call_count == 1
+    event_name, event_kwargs = mock_session.emit_event.call_args
+    assert event_name[0] == "FRAME_PROMPT_CONSTRUCTED"
+
+
+@pytest.mark.asyncio
+@patch('src.agents.director._construct_prompt')
+@patch('src.agents.director.generate_frame')
+@patch('src.agents.director.gcs_client.upload_asset')
+@patch('src.agents.director.supabase_client.create_asset_record')
+@patch('src.agents.director._get_session_service')
+async def test_invoke_generation_fails(
+    mock_get_session_service,
+    mock_create_asset_record,
+    mock_upload_asset,
+    mock_generate_frame,
+    mock_construct_prompt,
+):
+    """
+    Tests that the invoke pipeline returns an error if image generation fails.
+    """
+    # Assemble
+    payload = {"action_lines": ["Action!"], "scene_heading": "INT. PLACE - DAY"}
+    constructed_data = {"prompt": "A prompt", "assumption_note": "A note"}
+    mock_construct_prompt.return_value = constructed_data
+
+    mock_generate_frame.return_value = (None, "SAFETY")
+
+    mock_session = MagicMock()
+    mock_session.emit_event = AsyncMock()
+    mock_session_service = MagicMock()
+    mock_session_service.get_session = AsyncMock(return_value=mock_session)
+    mock_get_session_service.return_value = mock_session_service
+
+    # Act
+    result = await director.invoke(
+        payload=payload, user_id="test", project_id="p1", scene_id="s1"
+    )
+
+    # Assert
+    mock_construct_prompt.assert_awaited_once_with(payload)
+    mock_generate_frame.assert_awaited_once()
+    mock_upload_asset.assert_not_called()
+    mock_create_asset_record.assert_not_called()
+    assert result == {"error": "Image generation failed", "finish_reason": "SAFETY"}
+
 
 
 # ------------------------------------------------------------------------------
