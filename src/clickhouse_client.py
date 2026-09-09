@@ -172,3 +172,23 @@ def get_cell_definitions(cell_id_nums: list[int]):
         defs[row_dict["cell_id_num"]] = row_dict
         
     return defs
+
+
+def get_provenance_events(project_id: str):
+    """
+    Retrieve all provenance events for a project.
+    """
+    client = get_client()
+    query = "SELECT * FROM provenance_events WHERE project_id = %(project_id)s ORDER BY event_timestamp"
+    result = client.query(query, parameters={"project_id": project_id})
+    return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+def get_keystroke_batches(project_id: str):
+    """
+    Retrieve all keystroke batches for a project.
+    """
+    client = get_client()
+    query = "SELECT * FROM keystroke_batches WHERE project_id = %(project_id)s ORDER BY received_at_micros"
+    result = client.query(query, parameters={"project_id": project_id})
+    return [dict(zip(result.column_names, row)) for row in result.result_rows]

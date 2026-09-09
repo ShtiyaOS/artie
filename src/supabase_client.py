@@ -34,3 +34,9 @@ def create_asset_record(scene_id: str, gcs_uri: str, model: str, prompt: str, as
         "finish_reason": finish_reason,
     }).execute()
     return response.data[0]
+
+def get_all_components(project_id: str):
+    """Gets all components for a project."""
+    client = get_client()
+    response = client.rpc("get_all_components_for_project", {"prj_id": project_id}).execute()
+    return response.data
