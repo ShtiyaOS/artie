@@ -82,3 +82,27 @@ def get_ranked_gaps(project_id: str, bible_version_id: int):
         },
     )
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+def get_cell_definitions(cell_id_nums: list[int]):
+    """
+    Retrieve cell definitions from ClickHouse by their numeric IDs.
+    """
+    client = get_client()
+    query = "SELECT * FROM cells_src WHERE cell_id_num IN %(cell_id_nums)s"
+    result = client.query(query, parameters={"cell_id_nums": cell_id_nums})
+    
+    # The `diagnostic_question` and `failure_signature` are not in the DB.
+    # We will need to load them from the canonical source in a future step.
+    # For now, we will add placeholder values.
+    # This is a temporary measure to fulfill the contract for Task 38.
+    
+    defs = {}
+    for row in result.result_rows:
+        row_dict = dict(zip(result.column_names, row))
+        cell_id = row_dict["cell_id"]
+        row_dict["diagnostic_question"] = f"Placeholder question for {cell_id}"
+        row_dict["failure_signature"] = f"Placeholder failure signature for {cell_id}"
+        defs[row_dict["cell_id_num"]] = row_dict
+        
+    return defs

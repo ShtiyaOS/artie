@@ -6,15 +6,19 @@ appropriate agent via Runner.run_async. Agents are peers; Artie is never
 the parent of Supervisor or Director. See docs/05_orchestration.md §1.
 """
 
+import json
 import logging
 import os
 import threading
 import uuid
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.agents import artie
+from src.clickhouse_client import get_cell_definitions
 from src.confluent_producer import publish_event
 from src.supabase_client import get_client as get_supabase
 
@@ -128,6 +132,102 @@ async def session_open(request: Request):
 # changes.
 # ---------------------------------------------------------------------------
 
+async def handle_scene_diagnosed(event: dict[str, Any]):
+    """
+    Handles a SCENE_DIAGNOSED event from the Supervisor.
+
+    This is the "backend boundary" where prose is stripped.
+    docs/05_orchestration.md §5.3
+    """
+    logger.info("Handling SCENE_DIAGNOSED event for scene %s", event.get("scene_id"))
+    
+    supervisor_payload = event.get("payload", {})
+
+    # The payload from the supervisor via the event might be a JSON string.
+    if isinstance(supervisor_payload, str):
+        try:
+            supervisor_payload = json.loads(supervisor_payload)
+        except json.JSONDecodeError:
+            logger.error("Failed to decode supervisor payload: %s", supervisor_payload)
+            return
+
+    # In Task 37, the supervisor response is wrapped in a 'findings' object.
+    # The actual verdicts are inside response_text, which is another JSON string.
+    response_text = supervisor_payload.get("response_text")
+    if not response_text:
+        logger.error("No 'response_text' in SCENE_DIAGNOSED payload.")
+        return
+        
+    try:
+        findings = json.loads(response_text)
+    except json.JSONDecodeError:
+        logger.error("Failed to decode 'response_text' from supervisor: %s", response_text)
+        return
+
+    verdicts = findings.get("cell_verdicts", [])
+    if not verdicts:
+        logger.info("No verdicts found in SCENE_DIAGNOSED event.")
+        return
+
+    # 1. Fetch cell definitions from ClickHouse
+    cell_id_nums = [v["cell_id_num"] for v in verdicts]
+    if not cell_id_nums:
+        return
+    cell_defs = get_cell_definitions(cell_id_nums)
+
+    # 2. Transform verdicts into findings, stripping prose.
+    CONFIDENCE_MAP = {"ATTESTED": 1, "ANCHORED": 2, "EXTRAPOLATED": 3}
+    CONFIDENCE_MAP_INV = {v: k for k, v in CONFIDENCE_MAP.items()}
+
+    def get_display_confidence(cell_confidence: str, input_confidence: str) -> str:
+        if input_confidence == "PROVISIONAL":
+            level = CONFIDENCE_MAP.get(cell_confidence, 3)
+            new_level = min(level + 1, 3)
+            return CONFIDENCE_MAP_INV.get(new_level, "EXTRAPOLATED")
+        return cell_confidence
+
+    pending_findings = []
+    for verdict in verdicts:
+        cell_id_num = verdict["cell_id_num"]
+        cell_def = cell_defs.get(cell_id_num)
+        if not cell_def:
+            logger.warning("No cell definition found for cell_id_num %d", cell_id_num)
+            continue
+        
+        cell_confidence = cell_def.get("confidence", "EXTRAPOLATED")
+        input_confidence = verdict.get("input_confidence", "PROVISIONAL")
+
+        pending_findings.append({
+            "cell_id": cell_def["cell_id"],
+            "verdict": verdict["verdict"],
+            "cell_confidence": cell_confidence,
+            "input_confidence": input_confidence,
+            "display_confidence": get_display_confidence(cell_confidence, input_confidence),
+            "priority_weight": cell_def["priority_weight"],
+            "failure_signature": cell_def.get("failure_signature", f"Signature for {cell_def['cell_id']} not found."),
+        })
+
+    # 3. Construct payload for Artie.
+    artie_payload = {
+        "gate": "REVIEW",
+        "bible_slots": {},
+        "rig_slots": {},
+        "pending_findings": pending_findings,
+        "canon_findings": findings.get("canon_findings", []),
+        "coverage_summary": {},
+        "user_message": None, # This is a system event, not a user turn.
+    }
+
+    # 4. Invoke Artie.
+    await artie.invoke(
+        payload=artie_payload,
+        user_id="system", # The event is from the system, not directly from a user.
+        project_id=event.get("project_id"),
+        scene_id=event.get("scene_id"),
+        bible_version_id=event.get("bible_version_id", 0),
+    )
+
+
 @app.post("/events")
 async def receive_event(request: Request):
     """
@@ -140,15 +240,16 @@ async def receive_event(request: Request):
     event_type = body.get("event_type")
 
     # Route map is extended as tasks are implemented.
-    HANDLERS: dict[str, str] = {
-        # Task 15+: "SESSION_OPENED": handle_session_opened,
+    HANDLERS: dict[str, Any] = {
+        "SCENE_DIAGNOSED": handle_scene_diagnosed,
     }
 
-    if event_type not in HANDLERS:
-        return JSONResponse({"error": f"unknown event_type: {event_type}"}, status_code=400)
+    handler = HANDLERS.get(event_type)
+    if not handler:
+        logger.debug("Ignoring event type: %s", event_type)
+        return JSONResponse({"status": "ignored", "event_type": event_type}, status_code=200)
 
-    # handler = HANDLERS[event_type]
-    # await handler(body)
+    await handler(body)
     return JSONResponse({"status": "accepted"}, status_code=202)
 
 
