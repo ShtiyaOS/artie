@@ -30,3 +30,6 @@ CLAUDE.md
 static/test_frame*
 static/test_*
 sql/04_dictionaries.sql
+vo*.pcm
+vo*.wav
+scripts/make_vo.py
