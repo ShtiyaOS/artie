@@ -18,9 +18,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.agents import artie
+from src.blueprint import create_scene_one
 from src.clickhouse_client import get_cell_definitions
 from src.confluent_producer import publish_event
 from src.supabase_client import get_client as get_supabase
+
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,64 @@ async def editor_ui():
     return FileResponse(path, media_type="text/html")
 
 
+# --------------------------------------------------------------------------
+# Demo mode
 # ---------------------------------------------------------------------------
+
+@app.get("/demo")
+async def demo():
+    """
+    Find or create the demo project, ensuring it has a scene, a take, and
+    seeded components. Returns the IDs needed to load the editor.
+    Idempotent.
+    """
+    db = get_supabase()
+
+    # 1. Find or create the project.
+    project_title = "Demo — The Long Way Back"
+    project_res = db.table("projects").select("project_id").eq("working_title", project_title).limit(1).execute()
+
+    if project_res.data:
+        project_id = project_res.data[0]["project_id"]
+    else:
+        new_project_res = db.table("projects").insert({
+            "working_title": project_title,
+            "target_scene_count": 60,
+            "current_bible_version": 1,
+        }).execute()
+        project_id = new_project_res.data[0]["project_id"]
+
+    # 2. Find or create scene 1.
+    scene_id = create_scene_one(project_id)
+
+    # 3. Find or create a take.
+    take_res = db.table("takes").select("take_id").eq("scene_id", scene_id).limit(1).execute()
+    if take_res.data:
+        take_id = take_res.data[0]["take_id"]
+    else:
+        new_take_res = db.table("takes").insert({
+            "scene_id": scene_id,
+            "take_number": 1,
+        }).execute()
+        take_id = new_take_res.data[0]["take_id"]
+        
+        # Seed components for the new take.
+        components_to_seed = [
+            {"take_id": take_id, "sequence_order": 1, "comp_type": "SCENE_HEADING", "content": "INT. DINER - NIGHT"},
+            {"take_id": take_id, "sequence_order": 2, "comp_type": "ACTION", "content": "A man sits alone with cold coffee."},
+            {"take_id": take_id, "sequence_order": 3, "comp_type": "CHARACTER", "content": "MARLA"},
+            {"take_id": take_id, "sequence_order": 4, "comp_type": "DIALOGUE", "content": "You said you'd stop coming here."},
+        ]
+        db.table("script_components").insert(components_to_seed).execute()
+
+    return JSONResponse({
+        "project_id": project_id,
+        "scene_id": scene_id,
+        "take_id": take_id,
+    })
+
+
+# --------------------------------------------------------------------------
 # Health check — required by Cloud Run
 # ---------------------------------------------------------------------------
 

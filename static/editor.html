@@ -507,6 +507,7 @@ body {
     <label>Take ID (UUID — leave blank to create a new take)</label>
     <input type="text" id="input-take-id" placeholder="leave blank to create a new take">
   </div>
+  <button id="btn-open-demo">Open demo project</button>
   <button id="btn-open">Open Workbench</button>
   <p class="init-hint">
     This surface is the writer's workbench only.<br>
@@ -1076,6 +1077,29 @@ function handlePaste(e) {
 // ---------------------------------------------------------------------------
 // Init screen
 // ---------------------------------------------------------------------------
+document.getElementById("btn-open-demo").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-open-demo");
+  btn.disabled = true;
+  btn.textContent = "Loading demo…";
+  try {
+    const res = await fetch("/demo");
+    if (!res.ok) {
+      alert(`Error loading demo: ${res.statusText}`);
+      return;
+    }
+    const data = await res.json();
+    document.getElementById("input-project-id").value = data.project_id;
+    document.getElementById("input-scene-id").value = data.scene_id;
+    document.getElementById("input-take-id").value = data.take_id;
+    document.getElementById("btn-open").click();
+  } catch (e) {
+    alert(`Error loading demo: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Open demo project";
+  }
+});
+
 document.getElementById("btn-open").addEventListener("click", async () => {
   const rawProject = document.getElementById("input-project-id").value.trim();
   const rawScene = document.getElementById("input-scene-id").value.trim();
