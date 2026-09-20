@@ -204,7 +204,6 @@ portraits.
       video**
 - [ ] Original, unpublished demo screenplay
 - [ ] No third-party marks or logos
-- [ ] $100 credit secured — **$142.97 confirmed available**
 
 ---
 
